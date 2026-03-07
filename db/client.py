@@ -45,37 +45,52 @@ class SurrealClient:
 
         http = httpx.AsyncClient(
             base_url=url,
-            auth=(config.SURREALDB_USER, config.SURREALDB_PASS),
-            headers={
-                "Accept": "application/json",
-                "Surreal-NS": config.SURREALDB_NS,
-                "Surreal-DB": config.SURREALDB_DB,
-            },
+            headers={"Accept": "application/json"},
             timeout=30.0,
             verify=False,
         )
-        return cls(http, url, config.SURREALDB_NS, config.SURREALDB_DB)
+        client = cls(http, url, config.SURREALDB_NS, config.SURREALDB_DB)
+        await client._ensure_signed_in()
+        return client
 
     async def close(self):
         await self._http.aclose()
 
+    # ── RPC helpers ───────────────────────────────────────────
+
+    _rpc_id = 0
+
+    async def _rpc(self, method: str, params: list | None = None) -> Any:
+        """Send a JSON-RPC request to the /rpc endpoint."""
+        SurrealClient._rpc_id += 1
+        payload = {
+            "id": SurrealClient._rpc_id,
+            "method": method,
+            "params": params or [],
+        }
+        resp = await self._http.post(
+            "/rpc",
+            json=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if "error" in data and data["error"]:
+            raise RuntimeError(data["error"].get("message", str(data["error"])))
+        return data.get("result")
+
+    async def _ensure_signed_in(self) -> None:
+        """Sign in and select NS/DB via RPC (called once on connect)."""
+        await self._rpc("signin", [{"user": config.SURREALDB_USER, "pass": config.SURREALDB_PASS}])
+        await self._rpc("use", [self._ns, self._db])
+
     # ── Core query helpers ────────────────────────────────────
 
     async def query(self, surql: str, params: dict | None = None) -> list[Any]:
-        """Execute SurrealQL via the /sql REST endpoint and return results as a flat list."""
-        body = surql
-        headers = {}
-        if params:
-            # SurrealDB Cloud accepts variables via JSON body on /sql
-            # We bind them inline via LET statements for HTTP compatibility
-            let_stmts = "".join(f"LET ${k} = {json.dumps(v)};\n" for k, v in params.items())
-            body = let_stmts + surql
+        """Execute SurrealQL via JSON-RPC and return results as a flat list."""
+        raw = await self._rpc("query", [surql, params or {}])
 
-        resp = await self._http.post("/sql", content=body, headers={"Content-Type": "text/plain"})
-        resp.raise_for_status()
-        raw = resp.json()
-
-        # /sql returns a list of statement results: [{"result": [...], "status": "OK"}, ...]
+        # RPC query returns a list: [{"result": [...], "status": "OK"}, ...]
         statements = raw if isinstance(raw, list) else []
 
         rows: list[Any] = []
