@@ -29,10 +29,10 @@ async def get_customer_context(db: SurrealClient, customer_id: str) -> dict:
             ->had_interaction->(Interaction AS interaction) AS interactions,
             ->has_journey->(JourneyState AS journey) AS journey_states,
             ->eligible_for AS eligible_edges
-        FROM type::record('Customer', $cid)
+        FROM type::record($cid)
         FETCH owned_products, life_events, interactions, journey_states
         """,
-        {"cid": customer_id},
+        {"cid": f"Customer:{customer_id}"},
     )
     return rows[0] if rows else {}
 
@@ -42,10 +42,10 @@ async def get_eligible_products(db: SurrealClient, customer_id: str) -> list[dic
         """
         SELECT out.*, score, reason, evaluated_at
         FROM eligible_for
-        WHERE in = type::record('Customer', $cid)
+        WHERE in = type::record($cid)
         FETCH out
         """,
-        {"cid": customer_id},
+        {"cid": f"Customer:{customer_id}"},
     )
 
 
@@ -55,10 +55,10 @@ async def get_compliance_blocks(db: SurrealClient, product_id: str) -> list[dict
         """
         SELECT out.*, block_reason
         FROM blocked_by
-        WHERE in = type::record('Product', $pid)
+        WHERE in = type::record($pid)
         FETCH out
         """,
-        {"pid": product_id},
+        {"pid": f"Product:{product_id}"},
     )
 
 
@@ -67,10 +67,10 @@ async def get_compliance_approval_rules(db: SurrealClient, product_id: str) -> l
         """
         SELECT out.*, approval_reason
         FROM requires_approval
-        WHERE in = type::record('Product', $pid)
+        WHERE in = type::record($pid)
         FETCH out
         """,
-        {"pid": product_id},
+        {"pid": f"Product:{product_id}"},
     )
 
 
@@ -122,38 +122,39 @@ async def get_recent_interactions(db: SurrealClient, customer_id: str, limit: in
         """
         SELECT out.*
         FROM had_interaction
-        WHERE in = type::record('Customer', $cid)
+        WHERE in = type::record($cid)
         FETCH out
         ORDER BY out.created_at DESC
         LIMIT $lim
         """,
-        {"cid": customer_id, "lim": limit},
+        {"cid": f"Customer:{customer_id}", "lim": limit},
     )
 
 
 async def get_graph_for_viz(db: SurrealClient, customer_id: str) -> dict:
     """Return nodes + edges suitable for the graph visualizer."""
+    cid = f"Customer:{customer_id}"
     nodes_q = await db.query(
         """
-        SELECT 'customer' AS node_type, id, name, segment, kyc_status, risk_profile FROM type::record('Customer', $cid)
+        SELECT 'customer' AS node_type, id, name, segment, kyc_status, risk_profile FROM type::record($cid)
         """,
-        {"cid": customer_id},
+        {"cid": cid},
     )
     products_owned = await db.query(
-        "SELECT out.id, out.name, out.category, 'owned' AS edge_type FROM owns WHERE in = type::record('Customer', $cid) FETCH out",
-        {"cid": customer_id},
+        "SELECT out.id, out.name, out.category, 'owned' AS edge_type FROM owns WHERE in = type::record($cid) FETCH out",
+        {"cid": cid},
     )
     products_eligible = await db.query(
-        "SELECT out.id, out.name, out.category, score, 'eligible' AS edge_type FROM eligible_for WHERE in = type::record('Customer', $cid) FETCH out",
-        {"cid": customer_id},
+        "SELECT out.id, out.name, out.category, score, 'eligible' AS edge_type FROM eligible_for WHERE in = type::record($cid) FETCH out",
+        {"cid": cid},
     )
     life_events = await db.query(
-        "SELECT out.id, out.event_type, out.confidence, out.detected_at FROM triggered WHERE in = type::record('Customer', $cid) FETCH out",
-        {"cid": customer_id},
+        "SELECT out.id, out.event_type, out.confidence, out.detected_at FROM triggered WHERE in = type::record($cid) FETCH out",
+        {"cid": cid},
     )
     interactions = await db.query(
-        "SELECT out.id, out.interaction_type, out.sentiment, out.created_at FROM had_interaction WHERE in = type::record('Customer', $cid) FETCH out",
-        {"cid": customer_id},
+        "SELECT out.id, out.interaction_type, out.sentiment, out.created_at FROM had_interaction WHERE in = type::record($cid) FETCH out",
+        {"cid": cid},
     )
     blocked = await db.query(
         """
@@ -161,10 +162,10 @@ async def get_graph_for_viz(db: SurrealClient, customer_id: str) -> dict:
         FROM blocked_by AS bb
         INNER JOIN Product AS p ON bb.in = p.id
         INNER JOIN ComplianceRule AS cr ON bb.out = cr.id
-        WHERE bb.in IN (SELECT out FROM owns WHERE in = type::record('Customer', $cid))
-           OR bb.in IN (SELECT out FROM eligible_for WHERE in = type::record('Customer', $cid))
+        WHERE bb.in IN (SELECT out FROM owns WHERE in = type::record($cid))
+           OR bb.in IN (SELECT out FROM eligible_for WHERE in = type::record($cid))
         """,
-        {"cid": customer_id},
+        {"cid": cid},
     )
     return {
         "customer": nodes_q[0] if nodes_q else {},
@@ -196,7 +197,7 @@ async def write_interaction(
             sentiment        = $sentiment,
             created_at       = time::now()
         );
-        RELATE type::record('Customer', $cid)->had_interaction->$inode[0].id;
+        RELATE type::record($cid)->had_interaction->$inode[0].id;
         RETURN $inode[0].id;
         """,
         {
@@ -204,7 +205,7 @@ async def write_interaction(
             "chan": channel,
             "content": content,
             "sentiment": sentiment,
-            "cid": customer_id,
+            "cid": f"Customer:{customer_id}",
         },
     )
     if rows:
@@ -227,11 +228,11 @@ async def write_life_event(
             source      = $src,
             detected_at = time::now()
         );
-        RELATE type::record('Customer', $cid)->triggered->$ev[0].id
+        RELATE type::record($cid)->triggered->$ev[0].id
             SET detected_via = $src;
         RETURN $ev[0].id;
         """,
-        {"etype": event_type, "conf": confidence, "src": source, "cid": customer_id},
+        {"etype": event_type, "conf": confidence, "src": source, "cid": f"Customer:{customer_id}"},
     )
     return str(rows[-1]) if rows else ""
 
@@ -291,11 +292,11 @@ async def update_eligible_for(
 ) -> None:
     await db.query(
         """
-        DELETE eligible_for WHERE in = type::record('Customer', $cid) AND out = type::record('Product', $pid);
-        RELATE type::record('Customer', $cid)->eligible_for->type::record('Product', $pid)
+        DELETE eligible_for WHERE in = type::record($cid) AND out = type::record($pid);
+        RELATE type::record($cid)->eligible_for->type::record($pid)
             SET score = $score, reason = $reason, evaluated_at = time::now();
         """,
-        {"cid": customer_id, "pid": product_id, "score": score, "reason": reason},
+        {"cid": f"Customer:{customer_id}", "pid": f"Product:{product_id}", "score": score, "reason": reason},
     )
 
 
@@ -363,33 +364,33 @@ async def resolve_approval_request(
 ) -> None:
     await db.query(
         """
-        UPDATE type::record('ApprovalRequest', $rid) SET
+        UPDATE type::record($rid) SET
             status           = $status,
             advisor_response = $response,
             resolved_at      = time::now();
         """,
-        {"rid": request_id, "status": status, "response": advisor_response},
+        {"rid": f"ApprovalRequest:{request_id}", "status": status, "response": advisor_response},
     )
 
 
 async def toggle_compliance_rule(db: SurrealClient, rule_id: str, active: bool) -> None:
     await db.query(
-        "UPDATE type::record('ComplianceRule', $rid) SET active = $active;",
-        {"rid": rule_id, "active": active},
+        "UPDATE type::record($rid) SET active = $active;",
+        {"rid": f"ComplianceRule:{rule_id}", "active": active},
     )
 
 
 async def update_compliance_enforcement(db: SurrealClient, rule_id: str, enforcement: str) -> None:
     await db.query(
-        "UPDATE type::record('ComplianceRule', $rid) SET enforcement = $enforcement;",
-        {"rid": rule_id, "enforcement": enforcement},
+        "UPDATE type::record($rid) SET enforcement = $enforcement;",
+        {"rid": f"ComplianceRule:{rule_id}", "enforcement": enforcement},
     )
 
 
 async def mark_decision_reviewed(db: SurrealClient, log_id: str) -> None:
     await db.query(
-        "UPDATE type::record('DecisionLog', $lid) SET reviewed = true;",
-        {"lid": log_id},
+        "UPDATE type::record($lid) SET reviewed = true;",
+        {"lid": f"DecisionLog:{log_id}"},
     )
 
 
@@ -398,19 +399,19 @@ async def add_blocked_by_edge(
 ) -> None:
     await db.query(
         """
-        IF NOT (SELECT * FROM blocked_by WHERE in = type::record('Product', $pid) AND out = type::record('ComplianceRule', $rid)) THEN
-            RELATE type::record('Product', $pid)->blocked_by->type::record('ComplianceRule', $rid)
+        IF NOT (SELECT * FROM blocked_by WHERE in = type::record($pid) AND out = type::record($rid)) THEN
+            RELATE type::record($pid)->blocked_by->type::record($rid)
                 SET block_reason = $reason, blocking_since = time::now()
         END;
         """,
-        {"pid": product_id, "rid": rule_id, "reason": block_reason},
+        {"pid": f"Product:{product_id}", "rid": f"ComplianceRule:{rule_id}", "reason": block_reason},
     )
 
 
 async def remove_blocked_by_edge(db: SurrealClient, product_id: str, rule_id: str) -> None:
     await db.query(
-        "DELETE blocked_by WHERE in = type::record('Product', $pid) AND out = type::record('ComplianceRule', $rid);",
-        {"pid": product_id, "rid": rule_id},
+        "DELETE blocked_by WHERE in = type::record($pid) AND out = type::record($rid);",
+        {"pid": f"Product:{product_id}", "rid": f"ComplianceRule:{rule_id}"},
     )
 
 
@@ -421,8 +422,8 @@ async def get_interaction_count(db: SurrealClient) -> int:
 
 async def update_document_embedding(db: SurrealClient, doc_id: str, embedding: list[float]) -> None:
     await db.query(
-        "UPDATE type::record('document', $did) SET embedding = $emb;",
-        {"did": doc_id, "emb": embedding},
+        "UPDATE type::record($did) SET embedding = $emb;",
+        {"did": f"document:{doc_id}", "emb": embedding},
     )
 
 
@@ -438,6 +439,6 @@ async def vector_search_documents(
 async def update_compliance_conditions(db: SurrealClient, rule_id: str, conditions: dict) -> None:
     """Update the conditions JSON on a ComplianceRule — supports dynamic rule parameters."""
     await db.query(
-        "UPDATE type::record('ComplianceRule', $rid) SET conditions = $cond;",
-        {"rid": rule_id, "cond": conditions},
+        "UPDATE type::record($rid) SET conditions = $cond;",
+        {"rid": f"ComplianceRule:{rule_id}", "cond": conditions},
     )
