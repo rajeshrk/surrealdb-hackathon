@@ -29,7 +29,7 @@ async def get_customer_context(db: SurrealClient, customer_id: str) -> dict:
             ->had_interaction->(Interaction AS interaction) AS interactions,
             ->has_journey->(JourneyState AS journey) AS journey_states,
             ->eligible_for AS eligible_edges
-        FROM type::thing('Customer', $cid)
+        FROM type::record('Customer', $cid)
         FETCH owned_products, life_events, interactions, journey_states
         """,
         {"cid": customer_id},
@@ -42,7 +42,7 @@ async def get_eligible_products(db: SurrealClient, customer_id: str) -> list[dic
         """
         SELECT out.*, score, reason, evaluated_at
         FROM eligible_for
-        WHERE in = type::thing('Customer', $cid)
+        WHERE in = type::record('Customer', $cid)
         FETCH out
         """,
         {"cid": customer_id},
@@ -55,7 +55,7 @@ async def get_compliance_blocks(db: SurrealClient, product_id: str) -> list[dict
         """
         SELECT out.*, block_reason
         FROM blocked_by
-        WHERE in = type::thing('Product', $pid)
+        WHERE in = type::record('Product', $pid)
         FETCH out
         """,
         {"pid": product_id},
@@ -67,7 +67,7 @@ async def get_compliance_approval_rules(db: SurrealClient, product_id: str) -> l
         """
         SELECT out.*, approval_reason
         FROM requires_approval
-        WHERE in = type::thing('Product', $pid)
+        WHERE in = type::record('Product', $pid)
         FETCH out
         """,
         {"pid": product_id},
@@ -122,7 +122,7 @@ async def get_recent_interactions(db: SurrealClient, customer_id: str, limit: in
         """
         SELECT out.*
         FROM had_interaction
-        WHERE in = type::thing('Customer', $cid)
+        WHERE in = type::record('Customer', $cid)
         FETCH out
         ORDER BY out.created_at DESC
         LIMIT $lim
@@ -135,24 +135,24 @@ async def get_graph_for_viz(db: SurrealClient, customer_id: str) -> dict:
     """Return nodes + edges suitable for the graph visualizer."""
     nodes_q = await db.query(
         """
-        SELECT 'customer' AS node_type, id, name, segment, kyc_status, risk_profile FROM type::thing('Customer', $cid)
+        SELECT 'customer' AS node_type, id, name, segment, kyc_status, risk_profile FROM type::record('Customer', $cid)
         """,
         {"cid": customer_id},
     )
     products_owned = await db.query(
-        "SELECT out.id, out.name, out.category, 'owned' AS edge_type FROM owns WHERE in = type::thing('Customer', $cid) FETCH out",
+        "SELECT out.id, out.name, out.category, 'owned' AS edge_type FROM owns WHERE in = type::record('Customer', $cid) FETCH out",
         {"cid": customer_id},
     )
     products_eligible = await db.query(
-        "SELECT out.id, out.name, out.category, score, 'eligible' AS edge_type FROM eligible_for WHERE in = type::thing('Customer', $cid) FETCH out",
+        "SELECT out.id, out.name, out.category, score, 'eligible' AS edge_type FROM eligible_for WHERE in = type::record('Customer', $cid) FETCH out",
         {"cid": customer_id},
     )
     life_events = await db.query(
-        "SELECT out.id, out.event_type, out.confidence, out.detected_at FROM triggered WHERE in = type::thing('Customer', $cid) FETCH out",
+        "SELECT out.id, out.event_type, out.confidence, out.detected_at FROM triggered WHERE in = type::record('Customer', $cid) FETCH out",
         {"cid": customer_id},
     )
     interactions = await db.query(
-        "SELECT out.id, out.interaction_type, out.sentiment, out.created_at FROM had_interaction WHERE in = type::thing('Customer', $cid) FETCH out",
+        "SELECT out.id, out.interaction_type, out.sentiment, out.created_at FROM had_interaction WHERE in = type::record('Customer', $cid) FETCH out",
         {"cid": customer_id},
     )
     blocked = await db.query(
@@ -161,8 +161,8 @@ async def get_graph_for_viz(db: SurrealClient, customer_id: str) -> dict:
         FROM blocked_by AS bb
         INNER JOIN Product AS p ON bb.in = p.id
         INNER JOIN ComplianceRule AS cr ON bb.out = cr.id
-        WHERE bb.in IN (SELECT out FROM owns WHERE in = type::thing('Customer', $cid))
-           OR bb.in IN (SELECT out FROM eligible_for WHERE in = type::thing('Customer', $cid))
+        WHERE bb.in IN (SELECT out FROM owns WHERE in = type::record('Customer', $cid))
+           OR bb.in IN (SELECT out FROM eligible_for WHERE in = type::record('Customer', $cid))
         """,
         {"cid": customer_id},
     )
@@ -196,7 +196,7 @@ async def write_interaction(
             sentiment        = $sentiment,
             created_at       = time::now()
         );
-        RELATE type::thing('Customer', $cid)->had_interaction->$inode[0].id;
+        RELATE type::record('Customer', $cid)->had_interaction->$inode[0].id;
         RETURN $inode[0].id;
         """,
         {
@@ -227,7 +227,7 @@ async def write_life_event(
             source      = $src,
             detected_at = time::now()
         );
-        RELATE type::thing('Customer', $cid)->triggered->$ev[0].id
+        RELATE type::record('Customer', $cid)->triggered->$ev[0].id
             SET detected_via = $src;
         RETURN $ev[0].id;
         """,
@@ -291,8 +291,8 @@ async def update_eligible_for(
 ) -> None:
     await db.query(
         """
-        DELETE eligible_for WHERE in = type::thing('Customer', $cid) AND out = type::thing('Product', $pid);
-        RELATE type::thing('Customer', $cid)->eligible_for->type::thing('Product', $pid)
+        DELETE eligible_for WHERE in = type::record('Customer', $cid) AND out = type::record('Product', $pid);
+        RELATE type::record('Customer', $cid)->eligible_for->type::record('Product', $pid)
             SET score = $score, reason = $reason, evaluated_at = time::now();
         """,
         {"cid": customer_id, "pid": product_id, "score": score, "reason": reason},
@@ -363,7 +363,7 @@ async def resolve_approval_request(
 ) -> None:
     await db.query(
         """
-        UPDATE type::thing('ApprovalRequest', $rid) SET
+        UPDATE type::record('ApprovalRequest', $rid) SET
             status           = $status,
             advisor_response = $response,
             resolved_at      = time::now();
@@ -374,21 +374,21 @@ async def resolve_approval_request(
 
 async def toggle_compliance_rule(db: SurrealClient, rule_id: str, active: bool) -> None:
     await db.query(
-        "UPDATE type::thing('ComplianceRule', $rid) SET active = $active;",
+        "UPDATE type::record('ComplianceRule', $rid) SET active = $active;",
         {"rid": rule_id, "active": active},
     )
 
 
 async def update_compliance_enforcement(db: SurrealClient, rule_id: str, enforcement: str) -> None:
     await db.query(
-        "UPDATE type::thing('ComplianceRule', $rid) SET enforcement = $enforcement;",
+        "UPDATE type::record('ComplianceRule', $rid) SET enforcement = $enforcement;",
         {"rid": rule_id, "enforcement": enforcement},
     )
 
 
 async def mark_decision_reviewed(db: SurrealClient, log_id: str) -> None:
     await db.query(
-        "UPDATE type::thing('DecisionLog', $lid) SET reviewed = true;",
+        "UPDATE type::record('DecisionLog', $lid) SET reviewed = true;",
         {"lid": log_id},
     )
 
@@ -398,8 +398,8 @@ async def add_blocked_by_edge(
 ) -> None:
     await db.query(
         """
-        IF NOT (SELECT * FROM blocked_by WHERE in = type::thing('Product', $pid) AND out = type::thing('ComplianceRule', $rid)) THEN
-            RELATE type::thing('Product', $pid)->blocked_by->type::thing('ComplianceRule', $rid)
+        IF NOT (SELECT * FROM blocked_by WHERE in = type::record('Product', $pid) AND out = type::record('ComplianceRule', $rid)) THEN
+            RELATE type::record('Product', $pid)->blocked_by->type::record('ComplianceRule', $rid)
                 SET block_reason = $reason, blocking_since = time::now()
         END;
         """,
@@ -409,7 +409,7 @@ async def add_blocked_by_edge(
 
 async def remove_blocked_by_edge(db: SurrealClient, product_id: str, rule_id: str) -> None:
     await db.query(
-        "DELETE blocked_by WHERE in = type::thing('Product', $pid) AND out = type::thing('ComplianceRule', $rid);",
+        "DELETE blocked_by WHERE in = type::record('Product', $pid) AND out = type::record('ComplianceRule', $rid);",
         {"pid": product_id, "rid": rule_id},
     )
 
@@ -421,7 +421,7 @@ async def get_interaction_count(db: SurrealClient) -> int:
 
 async def update_document_embedding(db: SurrealClient, doc_id: str, embedding: list[float]) -> None:
     await db.query(
-        "UPDATE type::thing('document', $did) SET embedding = $emb;",
+        "UPDATE type::record('document', $did) SET embedding = $emb;",
         {"did": doc_id, "emb": embedding},
     )
 
@@ -438,6 +438,6 @@ async def vector_search_documents(
 async def update_compliance_conditions(db: SurrealClient, rule_id: str, conditions: dict) -> None:
     """Update the conditions JSON on a ComplianceRule — supports dynamic rule parameters."""
     await db.query(
-        "UPDATE type::thing('ComplianceRule', $rid) SET conditions = $cond;",
+        "UPDATE type::record('ComplianceRule', $rid) SET conditions = $cond;",
         {"rid": rule_id, "cond": conditions},
     )
