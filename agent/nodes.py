@@ -184,9 +184,31 @@ Only include products from the ELIGIBLE PRODUCTS list."""
             if match:
                 output = EligibilityOutput(**json.loads(match.group()))
             else:
+                print(f"[Agent WARN] Eligibility LLM returned unparseable output: {raw[:200]}")
                 output = EligibilityOutput(candidates=[], reasoning="Could not parse LLM output")
         except Exception as e:
+            print(f"[Agent ERROR] Eligibility LLM call failed: {e}")
             output = EligibilityOutput(candidates=[], reasoning=f"LLM error: {e}")
+
+        # Fallback: if LLM returned no candidates but we have eligible products,
+        # use the DB-scored eligible products directly so the pipeline can still
+        # provide useful responses
+        if not output.candidates and eligible_summary:
+            print(f"[Agent INFO] LLM returned no candidates; using {len(eligible_summary)} DB-scored products as fallback")
+            output = EligibilityOutput(
+                detected_life_event=output.detected_life_event,
+                candidates=[
+                    ProductCandidate(
+                        product_id=e["id"],
+                        product_name=e["name"],
+                        score=float(e.get("score", 0.5)),
+                        rationale=f"Eligible from knowledge graph: {e.get('category', '')} product",
+                    )
+                    for e in eligible_summary
+                    if e.get("id") and e.get("name")
+                ],
+                reasoning=output.reasoning or "Using pre-scored eligible products from knowledge graph",
+            )
 
         # Write detected life event to SurrealDB immediately
         new_events: list[dict] = []
@@ -461,17 +483,24 @@ If confidence < {config.CONFIDENCE_THRESHOLD}, set action to "escalate"."""
             if match:
                 action = ActionOutput(**json.loads(match.group()))
             else:
+                print(f"[Agent WARN] Action LLM returned unparseable output: {raw[:200]}")
                 action = ActionOutput(
-                    action="escalate",
-                    rationale="Could not parse LLM output",
-                    confidence=0.0,
+                    action="recommend",
+                    product_id=passed[0]["product_id"],
+                    product_name=passed[0]["product_name"],
+                    rationale=passed[0].get("rationale", "Best match from eligible products"),
+                    confidence=float(passed[0].get("score", 0.6)),
                     channel=channel,
                 )
         except Exception as e:
+            print(f"[Agent ERROR] Action LLM call failed: {e}")
+            # Fallback: recommend the top-scored passed candidate directly
             action = ActionOutput(
-                action="escalate",
-                rationale=f"Error selecting action: {e}",
-                confidence=0.0,
+                action="recommend",
+                product_id=passed[0]["product_id"],
+                product_name=passed[0]["product_name"],
+                rationale=passed[0].get("rationale", f"Top eligible product (LLM unavailable: {e})"),
+                confidence=float(passed[0].get("score", 0.5)),
                 channel=channel,
             )
 
@@ -521,9 +550,22 @@ If confidence < {config.CONFIDENCE_THRESHOLD}, set action to "escalate"."""
             )
 
         elif not action or action.get("action") == "escalate":
+            # Provide more context about why we're escalating
+            escalate_reason = ""
+            if blocked:
+                block_names = [
+                    (b.get("block_reasons") or [{}])[0].get("name", "")
+                    for b in blocked
+                ]
+                block_names = [n for n in block_names if n]
+                if block_names:
+                    escalate_reason = (
+                        f" Some products require attention: **{', '.join(block_names)}**."
+                    )
             msg = (
-                "Based on your profile, I'd like to connect you with one of our advisors "
-                "who can provide personalised guidance. Shall I arrange a callback?"
+                f"Based on your profile, I'd like to connect you with one of our advisors "
+                f"who can provide personalised guidance.{escalate_reason} "
+                "Shall I arrange a callback?"
             )
 
         elif action.get("action") == "retain":
