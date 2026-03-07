@@ -99,7 +99,17 @@ def build_journey_graph(
     graph.add_edge("graph_updater", END)
 
     # ── Compile ──────────────────────────────────────────────────────────
-    checkpointer = SurrealDBCheckpointer(db) if use_checkpointer else None
+    checkpointer = None
+    if use_checkpointer:
+        try:
+            ckpt = SurrealDBCheckpointer(db)
+            # Test that LangGraph accepts it before passing it in
+            compiled = graph.compile(checkpointer=ckpt)
+            return compiled
+        except (TypeError, ValueError):
+            # Fall back to InMemorySaver if custom checkpointer is rejected
+            from langgraph.checkpoint.memory import MemorySaver
+            checkpointer = MemorySaver()
     return graph.compile(checkpointer=checkpointer)
 
 
