@@ -5,11 +5,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ── SurrealDB ────────────────────────────────────────────────
-SURREALDB_URL  = os.environ.get("SURREALDB_URL",  "ws://localhost:8000/rpc")
+SURREALDB_URL  = os.environ.get("SURREALDB_URL",  "https://rustic-orchid-06eajrpg75qnr1h4dasihp8lqk.aws-euw1.surreal.cloud")
 SURREALDB_NS   = os.environ.get("SURREALDB_NS",   "hackathon")
 SURREALDB_DB   = os.environ.get("SURREALDB_DB",   "journey_agent")
-SURREALDB_USER = os.environ.get("SURREALDB_USER", "root")
-SURREALDB_PASS = os.environ.get("SURREALDB_PASS", "root")
+SURREALDB_USER = os.environ.get("SURREALDB_USER", "admin")
+SURREALDB_PASS = os.environ.get("SURREALDB_PASS", "admin")
 
 # ── Azure OpenAI ──────────────────────────────────────────────
 AZURE_OPENAI_ENDPOINT   = os.environ.get("AZURE_OPENAI_ENDPOINT", "")

@@ -12,53 +12,70 @@ Or for a long-lived singleton (Streamlit session):
 """
 import asyncio
 import json
-import os
 import pathlib
 from contextlib import asynccontextmanager
 from typing import Any
 
-from surrealdb import AsyncSurreal
+import httpx
 
 import config
 
 
 class SurrealClient:
-    """Thin wrapper around the surrealdb SDK with helper methods."""
+    """HTTP-based SurrealDB client for cloud and local connections."""
 
-    def __init__(self, client):
-        self._db = client
+    def __init__(self, http: httpx.AsyncClient, url: str, ns: str, db: str):
+        self._http = http
+        self._url = url.rstrip("/")
+        self._ns = ns
+        self._db = db
 
     # ── Factory ──────────────────────────────────────────────
 
     @classmethod
     async def connect(cls) -> "SurrealClient":
-        db = AsyncSurreal(config.SURREALDB_URL)
-        # HTTP connections don't need connect(); WS connections do
-        try:
-            await db.connect()
-        except NotImplementedError:
-            pass
-        await db.signin({"username": config.SURREALDB_USER, "password": config.SURREALDB_PASS})
-        await db.use(config.SURREALDB_NS, config.SURREALDB_DB)
-        return cls(db)
+        url = config.SURREALDB_URL
+        # Normalise WS URLs to HTTP for the REST API
+        if url.startswith("ws://"):
+            url = url.replace("ws://", "http://", 1)
+        elif url.startswith("wss://"):
+            url = url.replace("wss://", "https://", 1)
+        # Strip /rpc suffix if present
+        url = url.removesuffix("/rpc")
+
+        http = httpx.AsyncClient(
+            base_url=url,
+            auth=(config.SURREALDB_USER, config.SURREALDB_PASS),
+            headers={
+                "Accept": "application/json",
+                "Surreal-NS": config.SURREALDB_NS,
+                "Surreal-DB": config.SURREALDB_DB,
+            },
+            timeout=30.0,
+        )
+        return cls(http, url, config.SURREALDB_NS, config.SURREALDB_DB)
 
     async def close(self):
-        try:
-            await self._db.close()
-        except (NotImplementedError, Exception):
-            pass
+        await self._http.aclose()
 
     # ── Core query helpers ────────────────────────────────────
 
     async def query(self, surql: str, params: dict | None = None) -> list[Any]:
-        """Execute SurrealQL statement(s) and return all results as a flat list."""
-        raw = await self._db.query_raw(surql, params or {})
-        # query_raw returns {"result": [{"result": [...], "status": "OK"}, ...]}
-        statements = []
-        if isinstance(raw, dict) and "result" in raw:
-            statements = raw["result"]
-        elif isinstance(raw, list):
-            statements = raw
+        """Execute SurrealQL via the /sql REST endpoint and return results as a flat list."""
+        body = surql
+        headers = {}
+        if params:
+            # SurrealDB Cloud accepts variables via JSON body on /sql
+            # We bind them inline via LET statements for HTTP compatibility
+            let_stmts = "".join(f"LET ${k} = {json.dumps(v)};\n" for k, v in params.items())
+            body = let_stmts + surql
+
+        resp = await self._http.post("/sql", content=body, headers={"Content-Type": "application/json"})
+        resp.raise_for_status()
+        raw = resp.json()
+
+        # /sql returns a list of statement results: [{"result": [...], "status": "OK"}, ...]
+        statements = raw if isinstance(raw, list) else []
 
         rows: list[Any] = []
         for item in statements:
@@ -79,29 +96,33 @@ class SurrealClient:
         return rows[0] if rows else None
 
     async def create(self, table: str, data: dict) -> dict | None:
-        result = await self._db.create(table, data)
-        if isinstance(result, list):
-            return result[0] if result else None
-        return result
+        surql = f"CREATE {table} CONTENT {json.dumps(data)};"
+        rows = await self.query(surql)
+        return rows[0] if rows else None
 
     async def select(self, thing: str) -> list[dict] | dict | None:
-        return await self._db.select(thing)
+        rows = await self.query(f"SELECT * FROM {thing};")
+        return rows
 
     async def update(self, thing: str, data: dict) -> dict | None:
-        return await self._db.update(thing, data)
+        surql = f"UPDATE {thing} CONTENT {json.dumps(data)};"
+        rows = await self.query(surql)
+        return rows[0] if rows else None
 
     async def merge(self, thing: str, data: dict) -> dict | None:
-        return await self._db.merge(thing, data)
+        surql = f"UPDATE {thing} MERGE {json.dumps(data)};"
+        rows = await self.query(surql)
+        return rows[0] if rows else None
 
     async def delete(self, thing: str) -> Any:
-        return await self._db.delete(thing)
+        return await self.query(f"DELETE {thing};")
 
     async def relate(self, record_in: str, relation: str, record_out: str, data: dict | None = None) -> Any:
         surql = f"RELATE {record_in}->{relation}->{record_out}"
         if data:
-            pairs = ", ".join(f"{k} = ${k}" for k in data)
-            surql += f" SET {pairs}"
-        return await self.query(surql, data or {})
+            surql += f" CONTENT {json.dumps(data)}"
+        surql += ";"
+        return await self.query(surql)
 
     # ── Schema / seed bootstrap ───────────────────────────────
 
