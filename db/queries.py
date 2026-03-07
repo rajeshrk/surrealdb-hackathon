@@ -433,3 +433,11 @@ async def vector_search_documents(
         "SELECT id, title, content, doc_type, vector::similarity::cosine(embedding, $emb) AS score FROM document WHERE embedding != [] ORDER BY score DESC LIMIT $lim",
         {"emb": query_embedding, "lim": limit},
     )
+
+
+async def update_compliance_conditions(db: SurrealClient, rule_id: str, conditions: dict) -> None:
+    """Update the conditions JSON on a ComplianceRule — supports dynamic rule parameters."""
+    await db.query(
+        "UPDATE type::thing('ComplianceRule', $rid) SET conditions = $cond;",
+        {"rid": rule_id, "cond": conditions},
+    )
