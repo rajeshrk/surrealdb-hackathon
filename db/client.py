@@ -45,12 +45,21 @@ class SurrealClient:
 
         http = httpx.AsyncClient(
             base_url=url,
-            headers={"Accept": "application/json"},
+            auth=(config.SURREALDB_USER, config.SURREALDB_PASS),
+            headers={
+                "Accept": "application/json",
+                "Surreal-NS": config.SURREALDB_NS,
+                "Surreal-DB": config.SURREALDB_DB,
+            },
             timeout=30.0,
             verify=False,
         )
         client = cls(http, url, config.SURREALDB_NS, config.SURREALDB_DB)
-        await client._ensure_signed_in()
+        # signin + use via RPC to establish session
+        try:
+            await client._ensure_signed_in()
+        except Exception:
+            pass  # Basic auth + headers already provide access
         return client
 
     async def close(self):
