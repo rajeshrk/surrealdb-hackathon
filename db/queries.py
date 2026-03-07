@@ -233,24 +233,28 @@ async def write_interaction(
 ) -> str:
     """Create an Interaction node and link it to the customer. Returns the new record ID."""
     cid = _sanitize_id(customer_id)
+    # Build SET clause — omit sentiment if None to avoid NULL vs NONE issues
+    sentiment_clause = "sentiment = $sentiment," if sentiment else ""
+    params: dict = {
+        "itype": interaction_type,
+        "chan": channel,
+        "content": content,
+    }
+    if sentiment:
+        params["sentiment"] = sentiment
     rows = await db.query(
         f"""
         LET $inode = (CREATE Interaction SET
             interaction_type = $itype,
             channel          = $chan,
             content          = $content,
-            sentiment        = $sentiment,
+            {sentiment_clause}
             created_at       = time::now()
         );
         RELATE Customer:{cid}->had_interaction->$inode[0].id;
         RETURN $inode[0].id;
         """,
-        {
-            "itype": interaction_type,
-            "chan": channel,
-            "content": content,
-            "sentiment": sentiment,
-        },
+        params,
     )
     if rows:
         return str(rows[-1]) if not isinstance(rows[-1], dict) else str(rows[-1].get("id", ""))
@@ -296,6 +300,19 @@ async def write_decision_log(
 ) -> str:
     cid = _sanitize_id(customer_id)
     # Step 1: Create the DecisionLog node
+    # Omit optional fields when None to avoid NULL vs NONE coercion errors
+    trace_clause = "langsmith_trace_id = $trace_id," if langsmith_trace_id else ""
+    params: dict = {
+        "action": action_taken,
+        "reasoning": agent_reasoning,
+        "score": confidence_score,
+        "passed": compliance_gates_passed,
+        "failed": compliance_gates_failed,
+        "nodes": graph_nodes_consulted,
+        "needs_review": requires_human_review,
+    }
+    if langsmith_trace_id:
+        params["trace_id"] = langsmith_trace_id
     rows = await db.query(
         f"""
         CREATE DecisionLog SET
@@ -306,21 +323,12 @@ async def write_decision_log(
             compliance_gates_passed = $passed,
             compliance_gates_failed = $failed,
             graph_nodes_consulted   = $nodes,
-            langsmith_trace_id      = $trace_id,
+            {trace_clause}
             requires_human_review   = $needs_review,
             reviewed                = false,
             created_at              = time::now();
         """,
-        {
-            "action": action_taken,
-            "reasoning": agent_reasoning,
-            "score": confidence_score,
-            "passed": compliance_gates_passed,
-            "failed": compliance_gates_failed,
-            "nodes": graph_nodes_consulted,
-            "trace_id": langsmith_trace_id,
-            "needs_review": requires_human_review,
-        },
+        params,
     )
     dl_id = ""
     if rows and isinstance(rows[0], dict):
@@ -373,23 +381,26 @@ async def update_journey_state(
     pending_approval: bool = False,
 ) -> None:
     cid = _sanitize_id(customer_id)
+    ckpt_clause = "checkpoint_data = $ckpt," if checkpoint_data else ""
+    params: dict = {
+        "phase": phase,
+        "step": current_step,
+        "pending": pending_approval,
+    }
+    if checkpoint_data:
+        params["ckpt"] = checkpoint_data
     await db.query(
         f"""
         UPDATE JourneyState SET
             phase            = $phase,
             current_step     = $step,
-            checkpoint_data  = $ckpt,
+            {ckpt_clause}
             pending_approval = $pending,
             last_agent_run   = time::now(),
             updated_at       = time::now()
         WHERE customer_id = 'Customer:{cid}';
         """,
-        {
-            "phase": phase,
-            "step": current_step,
-            "ckpt": checkpoint_data,
-            "pending": pending_approval,
-        },
+        params,
     )
 
 
