@@ -17,7 +17,7 @@ import pathlib
 from contextlib import asynccontextmanager
 from typing import Any
 
-from surrealdb import Surreal
+from surrealdb import AsyncSurreal
 
 import config
 
@@ -25,41 +25,54 @@ import config
 class SurrealClient:
     """Thin wrapper around the surrealdb SDK with helper methods."""
 
-    def __init__(self, client: Surreal):
+    def __init__(self, client):
         self._db = client
 
     # ── Factory ──────────────────────────────────────────────
 
     @classmethod
     async def connect(cls) -> "SurrealClient":
-        db = Surreal(config.SURREALDB_URL)
-        await db.connect()
-        await db.signin({"user": config.SURREALDB_USER, "pass": config.SURREALDB_PASS})
+        db = AsyncSurreal(config.SURREALDB_URL)
+        # HTTP connections don't need connect(); WS connections do
+        try:
+            await db.connect()
+        except NotImplementedError:
+            pass
+        await db.signin({"username": config.SURREALDB_USER, "password": config.SURREALDB_PASS})
         await db.use(config.SURREALDB_NS, config.SURREALDB_DB)
         return cls(db)
 
     async def close(self):
-        await self._db.close()
+        try:
+            await self._db.close()
+        except (NotImplementedError, Exception):
+            pass
 
     # ── Core query helpers ────────────────────────────────────
 
     async def query(self, surql: str, params: dict | None = None) -> list[Any]:
-        """Execute a SurrealQL statement and return the result list."""
-        result = await self._db.query(surql, params or {})
-        # SDK returns list of result dicts: [{"result": [...], "status": "OK"}]
-        if isinstance(result, list):
-            rows: list[Any] = []
-            for item in result:
-                if isinstance(item, dict) and "result" in item:
-                    r = item["result"]
-                    if isinstance(r, list):
-                        rows.extend(r)
-                    elif r is not None:
-                        rows.append(r)
-                elif isinstance(item, list):
-                    rows.extend(item)
-            return rows
-        return []
+        """Execute SurrealQL statement(s) and return all results as a flat list."""
+        raw = await self._db.query_raw(surql, params or {})
+        # query_raw returns {"result": [{"result": [...], "status": "OK"}, ...]}
+        statements = []
+        if isinstance(raw, dict) and "result" in raw:
+            statements = raw["result"]
+        elif isinstance(raw, list):
+            statements = raw
+
+        rows: list[Any] = []
+        for item in statements:
+            if isinstance(item, dict) and "result" in item:
+                r = item["result"]
+                if isinstance(r, list):
+                    rows.extend(r)
+                elif r is not None:
+                    rows.append(r)
+            elif isinstance(item, list):
+                rows.extend(item)
+            elif isinstance(item, dict):
+                rows.append(item)
+        return rows
 
     async def query_one(self, surql: str, params: dict | None = None) -> dict | None:
         rows = await self.query(surql, params)
@@ -101,7 +114,7 @@ class SurrealClient:
             stmt = stmt.strip()
             if stmt and not stmt.startswith("--"):
                 try:
-                    await self._db.query(stmt + ";")
+                    await self.query(stmt + ";")
                 except Exception:
                     pass  # Ignore "already exists" errors on re-seed
 
