@@ -11,9 +11,12 @@ SURREALDB_DB   = os.environ.get("SURREALDB_DB",   "journey_agent")
 SURREALDB_USER = os.environ.get("SURREALDB_USER", "root")
 SURREALDB_PASS = os.environ.get("SURREALDB_PASS", "root")
 
-# ── LLM ─────────────────────────────────────────────────────
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-LLM_MODEL      = os.environ.get("LLM_MODEL", "gpt-4o-mini")
+# ── Azure OpenAI ──────────────────────────────────────────────
+AZURE_OPENAI_ENDPOINT   = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
+AZURE_OPENAI_API_KEY    = os.environ.get("AZURE_OPENAI_API_KEY", "")
+AZURE_OPENAI_DEPLOYMENT = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
+AZURE_OPENAI_API_VERSION = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-08-01-preview")
+AZURE_OPENAI_EMBEDDINGS_DEPLOYMENT = os.environ.get("AZURE_OPENAI_EMBEDDINGS_DEPLOYMENT", "text-embedding-3-small")
 
 # ── LangSmith ────────────────────────────────────────────────
 LANGCHAIN_TRACING_V2 = os.environ.get("LANGCHAIN_TRACING_V2", "false")

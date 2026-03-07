@@ -43,16 +43,18 @@ if "db_bootstrapped" not in st.session_state:
 if "embeddings_seeded" not in st.session_state:
     import config
 
-    if config.OPENAI_API_KEY:
+    if config.AZURE_OPENAI_API_KEY:
         with st.spinner("Generating document embeddings…"):
             async def _seed_embeddings() -> None:
-                from langchain_openai import OpenAIEmbeddings
+                from langchain_openai import AzureOpenAIEmbeddings
                 import db.queries as Q
 
                 db = await SurrealClient.connect()
-                emb_model = OpenAIEmbeddings(
-                    model="text-embedding-3-small",
-                    api_key=config.OPENAI_API_KEY,
+                emb_model = AzureOpenAIEmbeddings(
+                    azure_deployment=config.AZURE_OPENAI_EMBEDDINGS_DEPLOYMENT,
+                    azure_endpoint=config.AZURE_OPENAI_ENDPOINT,
+                    api_key=config.AZURE_OPENAI_API_KEY,
+                    api_version=config.AZURE_OPENAI_API_VERSION,
                 )
                 docs = await db.query(
                     "SELECT id, content FROM document WHERE embedding = []"

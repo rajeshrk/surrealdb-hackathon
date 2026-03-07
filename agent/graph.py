@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings
 from langgraph.graph import StateGraph, END
 
 import config
@@ -32,8 +32,8 @@ def route_after_compliance(state: JourneyAgentState) -> str:
 
 def build_journey_graph(
     db: SurrealClient,
-    llm: Optional[ChatOpenAI] = None,
-    embeddings: Optional[OpenAIEmbeddings] = None,
+    llm: Optional[AzureChatOpenAI] = None,
+    embeddings: Optional[AzureOpenAIEmbeddings] = None,
     use_checkpointer: bool = True,
 ):
     """
@@ -41,25 +41,29 @@ def build_journey_graph(
 
     Args:
         db: Connected SurrealDB client (injected into nodes via closure).
-        llm: LangChain LLM (defaults to ChatOpenAI with config.LLM_MODEL).
-        embeddings: OpenAI embeddings for vector RAG (optional).
+        llm: LangChain LLM (defaults to AzureChatOpenAI).
+        embeddings: Azure OpenAI embeddings for vector RAG (optional).
         use_checkpointer: Whether to attach the SurrealDB checkpoint saver.
 
     Returns:
         Compiled LangGraph runnable.
     """
     if llm is None:
-        llm = ChatOpenAI(
-            model=config.LLM_MODEL,
-            api_key=config.OPENAI_API_KEY,
+        llm = AzureChatOpenAI(
+            azure_deployment=config.AZURE_OPENAI_DEPLOYMENT,
+            azure_endpoint=config.AZURE_OPENAI_ENDPOINT,
+            api_key=config.AZURE_OPENAI_API_KEY,
+            api_version=config.AZURE_OPENAI_API_VERSION,
             temperature=0.2,
         )
 
-    if embeddings is None and config.OPENAI_API_KEY:
+    if embeddings is None and config.AZURE_OPENAI_API_KEY:
         try:
-            embeddings = OpenAIEmbeddings(
-                model="text-embedding-3-small",
-                api_key=config.OPENAI_API_KEY,
+            embeddings = AzureOpenAIEmbeddings(
+                azure_deployment=config.AZURE_OPENAI_EMBEDDINGS_DEPLOYMENT,
+                azure_endpoint=config.AZURE_OPENAI_ENDPOINT,
+                api_key=config.AZURE_OPENAI_API_KEY,
+                api_version=config.AZURE_OPENAI_API_VERSION,
             )
         except Exception:
             embeddings = None

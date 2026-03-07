@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from langchain_core.messages import HumanMessage
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings
 from pydantic import BaseModel, Field
 
 import config
@@ -58,8 +58,8 @@ class ActionOutput(BaseModel):
 
 def make_nodes(
     db: SurrealClient,
-    llm: ChatOpenAI,
-    embeddings: Optional[OpenAIEmbeddings],
+    llm: AzureChatOpenAI,
+    embeddings: Optional[AzureOpenAIEmbeddings],
 ) -> dict:
     """
     Create all 6 node functions with db/llm injected via closure.
