@@ -71,7 +71,7 @@ class SurrealClient:
             let_stmts = "".join(f"LET ${k} = {json.dumps(v)};\n" for k, v in params.items())
             body = let_stmts + surql
 
-        resp = await self._http.post("/sql", content=body, headers={"Content-Type": "application/json"})
+        resp = await self._http.post("/sql", content=body, headers={"Content-Type": "text/plain"})
         resp.raise_for_status()
         raw = resp.json()
 
