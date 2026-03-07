@@ -52,6 +52,7 @@ class SurrealClient:
                 "Surreal-DB": config.SURREALDB_DB,
             },
             timeout=30.0,
+            verify=False,
         )
         return cls(http, url, config.SURREALDB_NS, config.SURREALDB_DB)
 
