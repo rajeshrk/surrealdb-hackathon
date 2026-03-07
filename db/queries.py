@@ -255,9 +255,10 @@ async def write_decision_log(
     requires_human_review: bool = False,
 ) -> str:
     cid = _sanitize_id(customer_id)
+    # Step 1: Create the DecisionLog node
     rows = await db.query(
         f"""
-        LET $dl = (CREATE DecisionLog SET
+        CREATE DecisionLog SET
             customer_id             = 'Customer:{cid}',
             action_taken            = $action,
             agent_reasoning         = $reasoning,
@@ -268,11 +269,7 @@ async def write_decision_log(
             langsmith_trace_id      = $trace_id,
             requires_human_review   = $needs_review,
             reviewed                = false,
-            created_at              = time::now()
-        );
-        LET $js = (SELECT id FROM JourneyState WHERE customer_id = 'Customer:{cid}' LIMIT 1)[0];
-        IF $js.id != NONE THEN RELATE $js.id->has_decision->$dl[0].id END;
-        RETURN $dl[0].id;
+            created_at              = time::now();
         """,
         {
             "action": action_taken,
@@ -285,7 +282,27 @@ async def write_decision_log(
             "needs_review": requires_human_review,
         },
     )
-    return str(rows[-1]) if rows else ""
+    dl_id = ""
+    if rows and isinstance(rows[0], dict):
+        dl_id = str(rows[0].get("id", ""))
+
+    # Step 2: Link to JourneyState if one exists (separate query to avoid IF...THEN RELATE parse issues)
+    if dl_id:
+        js_rows = await db.query(
+            f"SELECT id FROM JourneyState WHERE customer_id = 'Customer:{cid}' LIMIT 1"
+        )
+        if js_rows and isinstance(js_rows[0], dict) and js_rows[0].get("id"):
+            js_id = str(js_rows[0]["id"])
+            js_id_safe = _sanitize_id(js_id)
+            dl_id_safe = _sanitize_id(dl_id)
+            try:
+                await db.query(
+                    f"RELATE JourneyState:{js_id_safe}->has_decision->DecisionLog:{dl_id_safe};"
+                )
+            except Exception:
+                pass  # Non-fatal — the log is still created
+
+    return dl_id
 
 
 async def update_eligible_for(

@@ -153,16 +153,24 @@ class SurrealClient:
 
     async def apply_file(self, path: str | pathlib.Path) -> None:
         """Execute every statement in a .surql file."""
+        import logging
+        logger = logging.getLogger("surrealdb")
         text = pathlib.Path(path).read_text()
         # Split on ';' but preserve semicolons inside strings is tricky;
         # we rely on statements being separated by ';\n'
         for stmt in text.split(";\n"):
             stmt = stmt.strip()
-            if stmt and not stmt.startswith("--"):
-                try:
-                    await self.query(stmt + ";")
-                except Exception:
-                    pass  # Ignore "already exists" errors on re-seed
+            # Skip empty lines and comment-only lines
+            lines = [ln.strip() for ln in stmt.splitlines() if ln.strip() and not ln.strip().startswith("--")]
+            if not lines:
+                continue
+            try:
+                await self.query(stmt + ";")
+            except Exception as exc:
+                # Log the error so we can debug seed/schema issues
+                snippet = stmt[:120].replace("\n", " ")
+                logger.warning("SurrealDB statement failed: %s — %s", snippet, exc)
+                print(f"[SurrealDB WARN] Statement failed: {snippet}... — {exc}")
 
     async def bootstrap(self) -> None:
         """Apply schema then seed data if Customer table is empty."""
@@ -172,6 +180,11 @@ class SurrealClient:
         count = count_result[0].get("count", 0) if count_result else 0
         if count == 0:
             await self.apply_file(base / "seed.surql")
+            # Verify seed worked
+            verify = await self.query("SELECT count() FROM Customer GROUP ALL")
+            verify_count = verify[0].get("count", 0) if verify else 0
+            if verify_count == 0:
+                print("[SurrealDB ERROR] Seed completed but Customer table is still empty!")
 
 
 # ── Module-level async context manager ───────────────────────

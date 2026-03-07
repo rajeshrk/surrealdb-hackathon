@@ -15,7 +15,9 @@ st.title("🛡️ Compliance Operations")
 
 @st.cache_resource
 def get_db() -> SurrealClient:
-    return run_sync(SurrealClient.connect())
+    db = run_sync(SurrealClient.connect())
+    run_sync(db.bootstrap())
+    return db
 
 
 # ── Analytics strip ───────────────────────────────────────────────────────
