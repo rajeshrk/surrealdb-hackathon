@@ -104,16 +104,21 @@ class SurrealClient:
 
         rows: list[Any] = []
         for item in statements:
-            if isinstance(item, dict) and "result" in item:
-                r = item["result"]
-                if isinstance(r, list):
-                    rows.extend(r)
-                elif r is not None:
-                    rows.append(r)
+            if isinstance(item, dict):
+                # Check for statement-level errors
+                if item.get("status") == "ERR":
+                    error_msg = item.get("result", "Unknown query error")
+                    raise RuntimeError(f"SurrealDB query error: {error_msg}")
+                if "result" in item:
+                    r = item["result"]
+                    if isinstance(r, list):
+                        rows.extend(r)
+                    elif r is not None:
+                        rows.append(r)
+                else:
+                    rows.append(item)
             elif isinstance(item, list):
                 rows.extend(item)
-            elif isinstance(item, dict):
-                rows.append(item)
         return rows
 
     async def query_one(self, surql: str, params: dict | None = None) -> dict | None:
@@ -172,6 +177,77 @@ class SurrealClient:
                 logger.warning("SurrealDB statement failed: %s — %s", snippet, exc)
                 print(f"[SurrealDB WARN] Statement failed: {snippet}... — {exc}")
 
+    async def _ensure_edges(self) -> None:
+        """Ensure graph edges exist — fallback to INSERT if RELATE failed."""
+        # Define all expected edges as (table, in_id, out_id, extra_fields)
+        edge_defs = [
+            # owns
+            ("owns", "Customer:sarah", "Product:checking", {"status": "active"}),
+            ("owns", "Customer:james", "Product:premium_mortgage", {"status": "active"}),
+            ("owns", "Customer:maria", "Product:basic_savings", {"status": "active"}),
+            # eligible_for
+            ("eligible_for", "Customer:sarah", "Product:savings_plus",
+             {"score": 0.85, "reason": "Good savings pattern"}),
+            ("eligible_for", "Customer:sarah", "Product:mortgage",
+             {"score": 0.70, "reason": "Stable income, no existing mortgage"}),
+            ("eligible_for", "Customer:james", "Product:home_insurance",
+             {"score": 0.90, "reason": "Mortgage holder without home insurance"}),
+            ("eligible_for", "Customer:james", "Product:investment_portfolio",
+             {"score": 0.60, "reason": "Wealth segment, but KYC expired"}),
+            ("eligible_for", "Customer:maria", "Product:cd_account",
+             {"score": 0.75, "reason": "Long-standing savings customer, CD would improve yield"}),
+            ("eligible_for", "Customer:maria", "Product:retirement_plan",
+             {"score": 0.80, "reason": "Age and conservative profile match retirement planning"}),
+            # has_journey
+            ("has_journey", "Customer:sarah", "JourneyState:sarah_journey", {}),
+            ("has_journey", "Customer:james", "JourneyState:james_journey", {}),
+            ("has_journey", "Customer:maria", "JourneyState:maria_journey", {}),
+            # had_interaction
+            ("had_interaction", "Customer:maria", "Interaction:maria_i1", {}),
+            ("had_interaction", "Customer:maria", "Interaction:maria_i2", {}),
+        ]
+
+        for table, in_id, out_id, extra in edge_defs:
+            # Check if edge already exists
+            try:
+                existing = await self.query(
+                    f"SELECT count() FROM {table} WHERE in = {in_id} AND out = {out_id} GROUP ALL"
+                )
+                count = existing[0].get("count", 0) if existing else 0
+                if count > 0:
+                    continue
+            except Exception:
+                pass
+
+            # Try RELATE first
+            extra_set = ", ".join(
+                f"{k} = {json.dumps(v)}" for k, v in extra.items()
+            )
+            set_clause = f" SET {extra_set}" if extra_set else ""
+            try:
+                await self.query(f"RELATE {in_id}->{table}->{out_id}{set_clause};")
+                continue
+            except Exception as e:
+                print(f"[SurrealDB INFO] RELATE failed for {table} ({in_id}->{out_id}): {e}")
+
+            # Fallback: INSERT INTO
+            try:
+                data = {"in": in_id, "out": out_id, **extra}
+                await self.query(
+                    f"INSERT INTO {table} {json.dumps(data)};"
+                )
+                print(f"[SurrealDB OK] Inserted {table} edge via INSERT fallback: {in_id}->{out_id}")
+            except Exception as e2:
+                # Last resort: CREATE with explicit in/out
+                try:
+                    await self.query(
+                        f"CREATE {table} CONTENT {json.dumps({'in': in_id, 'out': out_id, **extra})};"
+                    )
+                    print(f"[SurrealDB OK] Created {table} edge via CREATE fallback: {in_id}->{out_id}")
+                except Exception as e3:
+                    print(f"[SurrealDB ERROR] All methods failed for {table} {in_id}->{out_id}: "
+                          f"RELATE={e}, INSERT={e2}, CREATE={e3}")
+
     async def bootstrap(self) -> None:
         """Apply schema then seed data if Customer table is empty."""
         base = pathlib.Path(__file__).parent
@@ -187,12 +263,18 @@ class SurrealClient:
                 print("[SurrealDB ERROR] Seed completed but Customer table is still empty!")
             else:
                 print(f"[SurrealDB OK] Seeded {verify_count} customers")
-            # Verify eligible_for edges
-            ef_count = await self.query("SELECT count() FROM eligible_for GROUP ALL")
-            ef_n = ef_count[0].get("count", 0) if ef_count else 0
-            print(f"[SurrealDB OK] eligible_for edges: {ef_n}")
-            if ef_n == 0:
-                print("[SurrealDB WARN] No eligible_for edges found — RELATE statements may have failed")
+
+        # Always ensure edges exist (fixes RELATE failures)
+        await self._ensure_edges()
+
+        # Report edge counts
+        for table in ("owns", "eligible_for", "has_journey", "had_interaction"):
+            try:
+                ec = await self.query(f"SELECT count() FROM {table} GROUP ALL")
+                n = ec[0].get("count", 0) if ec else 0
+                print(f"[SurrealDB OK] {table} edges: {n}")
+            except Exception:
+                print(f"[SurrealDB WARN] Could not count {table} edges")
 
 
 # ── Module-level async context manager ───────────────────────
