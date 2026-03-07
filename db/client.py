@@ -161,17 +161,29 @@ async def get_client():
         await client.close()
 
 
-# ── Synchronous helper for Streamlit (runs event loop once) ──
+# ── Persistent event loop in a background thread ─────────────
+# This keeps httpx AsyncClient connections alive across multiple
+# run_sync() calls (Streamlit re-runs the script on every interaction).
+
+import threading
+
+_loop: asyncio.AbstractEventLoop | None = None
+_thread: threading.Thread | None = None
+_lock = threading.Lock()
+
+
+def _get_loop() -> asyncio.AbstractEventLoop:
+    global _loop, _thread
+    with _lock:
+        if _loop is None or _loop.is_closed():
+            _loop = asyncio.new_event_loop()
+            _thread = threading.Thread(target=_loop.run_forever, daemon=True)
+            _thread.start()
+    return _loop
+
 
 def run_sync(coro):
-    """Run an async coroutine synchronously (for Streamlit callbacks)."""
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                future = pool.submit(asyncio.run, coro)
-                return future.result()
-        return loop.run_until_complete(coro)
-    except RuntimeError:
-        return asyncio.run(coro)
+    """Run an async coroutine synchronously using a persistent background loop."""
+    loop = _get_loop()
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    return future.result()
