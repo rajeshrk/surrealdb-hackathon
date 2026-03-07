@@ -179,35 +179,43 @@ class SurrealClient:
 
     async def _ensure_edges(self) -> None:
         """Ensure graph edges exist — fallback to INSERT if RELATE failed."""
-        # Define all expected edges as (table, in_id, out_id, extra_fields)
+        print("[SurrealDB] Checking graph edges...")
+
+        # Define all expected edges as (table, in_id, out_id, extra_set_clause)
+        # extra_set_clause uses SurrealQL syntax (not JSON) for proper type handling
         edge_defs = [
             # owns
-            ("owns", "Customer:sarah", "Product:checking", {"status": "active"}),
-            ("owns", "Customer:james", "Product:premium_mortgage", {"status": "active"}),
-            ("owns", "Customer:maria", "Product:basic_savings", {"status": "active"}),
+            ("owns", "Customer:sarah", "Product:checking",
+             "SET status = 'active'"),
+            ("owns", "Customer:james", "Product:premium_mortgage",
+             "SET status = 'active'"),
+            ("owns", "Customer:maria", "Product:basic_savings",
+             "SET status = 'active'"),
             # eligible_for
             ("eligible_for", "Customer:sarah", "Product:savings_plus",
-             {"score": 0.85, "reason": "Good savings pattern"}),
+             "SET score = 0.85, reason = 'Good savings pattern'"),
             ("eligible_for", "Customer:sarah", "Product:mortgage",
-             {"score": 0.70, "reason": "Stable income, no existing mortgage"}),
+             "SET score = 0.70, reason = 'Stable income, no existing mortgage'"),
             ("eligible_for", "Customer:james", "Product:home_insurance",
-             {"score": 0.90, "reason": "Mortgage holder without home insurance"}),
+             "SET score = 0.90, reason = 'Mortgage holder without home insurance'"),
             ("eligible_for", "Customer:james", "Product:investment_portfolio",
-             {"score": 0.60, "reason": "Wealth segment, but KYC expired"}),
+             "SET score = 0.60, reason = 'Wealth segment, but KYC expired'"),
             ("eligible_for", "Customer:maria", "Product:cd_account",
-             {"score": 0.75, "reason": "Long-standing savings customer, CD would improve yield"}),
+             "SET score = 0.75, reason = 'Long-standing savings customer, CD would improve yield'"),
             ("eligible_for", "Customer:maria", "Product:retirement_plan",
-             {"score": 0.80, "reason": "Age and conservative profile match retirement planning"}),
+             "SET score = 0.80, reason = 'Age and conservative profile match retirement planning'"),
             # has_journey
-            ("has_journey", "Customer:sarah", "JourneyState:sarah_journey", {}),
-            ("has_journey", "Customer:james", "JourneyState:james_journey", {}),
-            ("has_journey", "Customer:maria", "JourneyState:maria_journey", {}),
+            ("has_journey", "Customer:sarah", "JourneyState:sarah_journey", ""),
+            ("has_journey", "Customer:james", "JourneyState:james_journey", ""),
+            ("has_journey", "Customer:maria", "JourneyState:maria_journey", ""),
             # had_interaction
-            ("had_interaction", "Customer:maria", "Interaction:maria_i1", {}),
-            ("had_interaction", "Customer:maria", "Interaction:maria_i2", {}),
+            ("had_interaction", "Customer:maria", "Interaction:maria_i1", ""),
+            ("had_interaction", "Customer:maria", "Interaction:maria_i2", ""),
         ]
 
-        for table, in_id, out_id, extra in edge_defs:
+        created = 0
+        skipped = 0
+        for table, in_id, out_id, set_clause in edge_defs:
             # Check if edge already exists
             try:
                 existing = await self.query(
@@ -215,41 +223,45 @@ class SurrealClient:
                 )
                 count = existing[0].get("count", 0) if existing else 0
                 if count > 0:
+                    skipped += 1
                     continue
-            except Exception:
-                pass
+            except Exception as exc:
+                print(f"[SurrealDB WARN] Edge check failed for {table} {in_id}->{out_id}: {exc}")
 
-            # Try RELATE first
-            extra_set = ", ".join(
-                f"{k} = {json.dumps(v)}" for k, v in extra.items()
-            )
-            set_clause = f" SET {extra_set}" if extra_set else ""
+            # Try RELATE with native SurrealQL syntax
+            relate_stmt = f"RELATE {in_id}->{table}->{out_id} {set_clause}".strip()
             try:
-                await self.query(f"RELATE {in_id}->{table}->{out_id}{set_clause};")
+                await self.query(f"{relate_stmt};")
+                created += 1
+                print(f"[SurrealDB OK] Created edge: {table} {in_id}->{out_id}")
                 continue
             except Exception as e:
-                print(f"[SurrealDB INFO] RELATE failed for {table} ({in_id}->{out_id}): {e}")
+                print(f"[SurrealDB WARN] RELATE failed for {table} ({in_id}->{out_id}): {e}")
 
-            # Fallback: INSERT INTO
+            # Fallback: use native SurrealQL INSERT with record ID syntax
+            # This avoids json.dumps which would quote record IDs as strings
+            insert_stmt = (
+                f"INSERT INTO {table} "
+                f"{{ in: {in_id}, out: {out_id}"
+            )
+            if set_clause:
+                # Convert "SET score = 0.85, reason = 'foo'" to object fields
+                fields = set_clause.removeprefix("SET ").strip()
+                insert_stmt += f", {fields}"
+            insert_stmt += " }"
             try:
-                data = {"in": in_id, "out": out_id, **extra}
-                await self.query(
-                    f"INSERT INTO {table} {json.dumps(data)};"
-                )
-                print(f"[SurrealDB OK] Inserted {table} edge via INSERT fallback: {in_id}->{out_id}")
+                await self.query(f"{insert_stmt};")
+                created += 1
+                print(f"[SurrealDB OK] Inserted edge via INSERT: {table} {in_id}->{out_id}")
             except Exception as e2:
-                # Last resort: CREATE with explicit in/out
-                try:
-                    await self.query(
-                        f"CREATE {table} CONTENT {json.dumps({'in': in_id, 'out': out_id, **extra})};"
-                    )
-                    print(f"[SurrealDB OK] Created {table} edge via CREATE fallback: {in_id}->{out_id}")
-                except Exception as e3:
-                    print(f"[SurrealDB ERROR] All methods failed for {table} {in_id}->{out_id}: "
-                          f"RELATE={e}, INSERT={e2}, CREATE={e3}")
+                print(f"[SurrealDB ERROR] All methods failed for {table} {in_id}->{out_id}: "
+                      f"RELATE={e}, INSERT={e2}")
+
+        print(f"[SurrealDB] Edge check complete: {created} created, {skipped} already existed")
 
     async def bootstrap(self) -> None:
         """Apply schema then seed data if Customer table is empty."""
+        print("[SurrealDB] Bootstrap starting...")
         base = pathlib.Path(__file__).parent
         await self.apply_file(base / "schema.surql")
         count_result = await self.query("SELECT count() FROM Customer GROUP ALL")
