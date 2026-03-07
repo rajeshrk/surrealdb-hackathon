@@ -50,14 +50,54 @@ async def get_customer_context(db: SurrealClient, customer_id: str) -> dict:
 
 async def get_eligible_products(db: SurrealClient, customer_id: str) -> list[dict]:
     cid = _sanitize_id(customer_id)
-    return await db.query(
+    # Use SELECT * and FETCH out to get the full product record resolved
+    # under the 'out' key alongside score/reason/evaluated_at
+    results = await db.query(
         f"""
-        SELECT out.*, score, reason, evaluated_at
+        SELECT *, out.name AS product_name, out.category AS product_category,
+               out.risk_level AS product_risk_level, out.requires_kyc AS product_requires_kyc,
+               out.annual_fee AS product_annual_fee, out.cooling_off_days AS product_cooling_off_days
         FROM eligible_for
         WHERE in = Customer:{cid}
         FETCH out
         """
     )
+    # Normalize: ensure each result has an 'out' dict with product fields
+    normalized = []
+    for r in results:
+        out = r.get("out")
+        if isinstance(out, str):
+            # out wasn't fetched — build product dict from projected fields
+            out = {
+                "id": r.get("out", ""),
+                "name": r.get("product_name", ""),
+                "category": r.get("product_category", ""),
+                "risk_level": r.get("product_risk_level", "low"),
+                "requires_kyc": r.get("product_requires_kyc", True),
+                "annual_fee": r.get("product_annual_fee"),
+                "cooling_off_days": r.get("product_cooling_off_days", 0),
+            }
+        elif isinstance(out, dict):
+            # out was fetched correctly — already a full product record
+            pass
+        else:
+            # Fallback: try building from projected fields
+            out = {
+                "id": r.get("product_name", ""),
+                "name": r.get("product_name", ""),
+                "category": r.get("product_category", ""),
+                "risk_level": r.get("product_risk_level", "low"),
+                "requires_kyc": r.get("product_requires_kyc", True),
+                "annual_fee": r.get("product_annual_fee"),
+                "cooling_off_days": r.get("product_cooling_off_days", 0),
+            }
+        normalized.append({
+            "out": out,
+            "score": r.get("score", 0.5),
+            "reason": r.get("reason", ""),
+            "evaluated_at": r.get("evaluated_at"),
+        })
+    return normalized
 
 
 async def get_compliance_blocks(db: SurrealClient, product_id: str) -> list[dict]:

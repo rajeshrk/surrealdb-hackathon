@@ -73,6 +73,17 @@ def make_nodes(
 
         ctx = await Q.get_customer_context(db, customer_id)
         eligible = await Q.get_eligible_products(db, customer_id)
+        print(f"[Agent DEBUG] Customer '{customer_id}' context keys: {list(ctx.keys())}")
+        print(f"[Agent DEBUG] Eligible products loaded: {len(eligible)} items")
+        if eligible:
+            print(f"[Agent DEBUG] Eligible sample: {eligible[0]}")
+        else:
+            # Diagnostic: check if eligible_for table has ANY data
+            ef_all = await db.query("SELECT count() FROM eligible_for GROUP ALL")
+            ef_raw = await db.query(f"SELECT * FROM eligible_for WHERE in = Customer:{Q._sanitize_id(customer_id)}")
+            print(f"[Agent DEBUG] No eligible products for Customer:{customer_id}")
+            print(f"[Agent DEBUG] Total eligible_for edges in DB: {ef_all}")
+            print(f"[Agent DEBUG] Raw eligible_for query result: {ef_raw}")
 
         # Vector RAG on the user's message
         user_message = state.get("user_message", "")

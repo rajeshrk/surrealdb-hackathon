@@ -185,6 +185,14 @@ class SurrealClient:
             verify_count = verify[0].get("count", 0) if verify else 0
             if verify_count == 0:
                 print("[SurrealDB ERROR] Seed completed but Customer table is still empty!")
+            else:
+                print(f"[SurrealDB OK] Seeded {verify_count} customers")
+            # Verify eligible_for edges
+            ef_count = await self.query("SELECT count() FROM eligible_for GROUP ALL")
+            ef_n = ef_count[0].get("count", 0) if ef_count else 0
+            print(f"[SurrealDB OK] eligible_for edges: {ef_n}")
+            if ef_n == 0:
+                print("[SurrealDB WARN] No eligible_for edges found — RELATE statements may have failed")
 
 
 # ── Module-level async context manager ───────────────────────
