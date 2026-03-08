@@ -535,98 +535,132 @@ If confidence < {config.CONFIDENCE_THRESHOLD}, set action to "escalate"."""
             "channel": action.channel,
         }
 
-    # ── Node 5: Channel Router (Deterministic) ────────────────────────────
+    # ── Node 5: Channel Router (LLM-powered conversational response) ─────
 
-    def channel_router_node(state: JourneyAgentState) -> dict:
+    async def channel_router_node(state: JourneyAgentState) -> dict:
         action = state.get("selected_action")
         customer = state["customer_profile"]
         channel = state.get("channel") or customer.get("channel_preference", "app")
         compliance_result = state.get("compliance_result", {})
         blocked = compliance_result.get("blocked", [])
         needs_approval_list = compliance_result.get("needs_approval", [])
+        user_message = state.get("user_message", "")
 
         name = customer.get("name", "Valued Customer")
         first_name = name.split()[0]
 
-        if state.get("requires_human_approval"):
-            product_name = (
-                needs_approval_list[0].get("product_name", "a product")
-                if needs_approval_list
-                else "a product"
-            )
-            msg = (
-                f"I'd love to recommend our **{product_name}** for you, "
-                "but this requires a quick review by your advisor first. "
-                "I've flagged this for them and you'll hear back very soon."
-            )
+        # Build conversation history for context
+        chat_history = state.get("messages", [])
+        # Only include previous turns (not the current message)
+        prev_turns = [
+            m for m in chat_history
+            if isinstance(m, dict)
+            and m.get("content") != user_message
+        ]
+        history_text = ""
+        if prev_turns:
+            history_lines = []
+            for m in prev_turns[-6:]:  # last 3 exchanges
+                role = m.get("role", "user").upper()
+                history_lines.append(f"{role}: {m.get('content', '')}")
+            history_text = "\n".join(history_lines)
 
-        elif not action or action.get("action") == "escalate":
-            # Provide more context about why we're escalating
-            escalate_reason = ""
-            if blocked:
-                block_names = [
-                    (b.get("block_reasons") or [{}])[0].get("name", "")
-                    for b in blocked
-                ]
-                block_names = [n for n in block_names if n]
-                if block_names:
-                    escalate_reason = (
-                        f" Some products require attention: **{', '.join(block_names)}**."
+        # Build context about what happened in the pipeline
+        context_parts = []
+        if action:
+            context_parts.append(
+                f"SELECTED ACTION: {action.get('action')} — "
+                f"Product: {action.get('product_name', 'N/A')} — "
+                f"Rationale: {action.get('rationale', '')}"
+            )
+        if blocked:
+            for b in blocked:
+                reasons = b.get("block_reasons", [])
+                for r in reasons:
+                    context_parts.append(
+                        f"BLOCKED: {b.get('product_name', '')} — {r.get('name', '')}: {r.get('reason', '')}"
                     )
-            msg = (
-                f"Based on your profile, I'd like to connect you with one of our advisors "
-                f"who can provide personalised guidance.{escalate_reason} "
-                "Shall I arrange a callback?"
-            )
-
-        elif action.get("action") == "retain":
-            msg = (
-                f"As a valued customer of {customer.get('segment', 'our')} banking, "
-                f"we have a special offer for you: {action.get('rationale', '')} "
-                "Would you like to learn more?"
-            )
-
-        elif blocked and not compliance_result.get("passed"):
-            block_reason = (
-                (blocked[0].get("block_reasons") or [{}])[0].get(
-                    "name", "a compliance requirement"
+        if needs_approval_list:
+            for n in needs_approval_list:
+                context_parts.append(
+                    f"NEEDS APPROVAL: {n.get('product_name', '')} — flagged for advisor review"
                 )
-            )
-            alt_rationale = action.get("rationale", "") if action else ""
-            msg = (
-                f"I'm sorry, I can't offer that product right now due to "
-                f"**{block_reason}**. "
-                + (f"{alt_rationale} " if alt_rationale else "")
-                + "Would you like more information or to explore alternatives?"
-            )
 
-        else:
-            product_name = action.get("product_name", "a suitable product")
-            rationale = action.get("rationale", "")
-            if channel == "email":
+        detected_events = state.get("detected_life_events", [])
+        if detected_events:
+            for ev in detected_events:
+                context_parts.append(
+                    f"LIFE EVENT DETECTED: {ev.get('event_type', '')} (confidence: {ev.get('confidence', 0):.0%})"
+                )
+
+        context_summary = "\n".join(context_parts) if context_parts else "No specific action taken."
+
+        # Generate conversational response via LLM
+        response_prompt = f"""You are a friendly, professional banking assistant chatting with {first_name}.
+Your tone should be warm, helpful, and conversational. You are NOT a generic chatbot — you have
+real knowledge about the customer and their financial situation.
+
+CUSTOMER: {first_name} {customer.get('segment', '')} segment, age {customer.get('age', '')}, risk profile: {customer.get('risk_profile', '')}
+OWNED PRODUCTS: {[p.get('name', '') for p in state.get('owned_products', [])]}
+CHANNEL: {channel}
+
+{"CONVERSATION HISTORY:" if history_text else ""}
+{history_text}
+
+CURRENT MESSAGE: "{user_message}"
+
+AGENT DECISION:
+{context_summary}
+
+AGENT REASONING: {state.get('agent_reasoning', '')}
+
+INSTRUCTIONS:
+- Respond naturally to what the customer said. If they're asking a question, answer it.
+- If a product was recommended, weave it naturally into the conversation — explain WHY it's relevant to them.
+- If they're asking follow-up questions about a previously mentioned product, provide more details.
+- If products were blocked (e.g., KYC expired), explain the situation helpfully and suggest next steps.
+- If the customer is just chatting or asking general questions, be helpful and informative.
+- Keep the response concise (2-4 sentences for app/sms, slightly longer for email).
+- Use markdown **bold** for product names.
+- Do NOT repeat the same recommendation verbatim if it was already given in conversation history.
+- Be specific — reference the customer's actual situation, not generic advice.
+- End with an engaging question or call to action when appropriate."""
+
+        try:
+            response = await llm.ainvoke([HumanMessage(content=response_prompt)])
+            msg = response.content.strip()
+        except Exception as e:
+            print(f"[Agent WARN] Channel router LLM failed: {e}")
+            # Fallback to template-based response
+            if state.get("requires_human_approval"):
+                product_name = (
+                    needs_approval_list[0].get("product_name", "a product")
+                    if needs_approval_list else "a product"
+                )
                 msg = (
-                    f"Dear {name},\n\n"
-                    f"Based on your profile, we recommend our **{product_name}**.\n\n"
-                    f"{rationale}\n\n"
-                    "Please let us know if you'd like to proceed.\n\n"
-                    "Kind regards,\nYour Banking Team"
+                    f"I'd love to recommend our **{product_name}** for you, "
+                    "but this requires a quick review by your advisor first. "
+                    "I've flagged this for them and you'll hear back very soon."
                 )
-            elif channel == "sms":
+            elif not action or action.get("action") == "escalate":
                 msg = (
-                    f"Hi {first_name}! We recommend {product_name}. "
-                    f"{rationale[:100]}... Reply YES to learn more."
+                    f"Based on your profile, I'd like to connect you with one of our advisors "
+                    "who can provide personalised guidance. Shall I arrange a callback?"
                 )
-            else:  # app / advisor
+            elif action:
+                product_name = action.get("product_name", "a suitable product")
+                rationale = action.get("rationale", "")
                 msg = (
                     f"Great news, {first_name}! Based on your profile, "
                     f"I recommend our **{product_name}**.\n\n{rationale}\n\n"
                     "Would you like to proceed or find out more?"
                 )
+            else:
+                msg = "I'm here to help! Could you tell me more about what you're looking for?"
 
-            # High-value products → route to advisor
-            annual_fee = float(
-                (action.get("product") or {}).get("annual_fee") or 0
-            ) if isinstance(action.get("product"), dict) else 0
+        # High-value products → route to advisor
+        if action and isinstance(action.get("product"), dict):
+            annual_fee = float((action["product"]).get("annual_fee") or 0)
             if annual_fee > config.HIGH_VALUE_FEE_THRESHOLD:
                 channel = "advisor"
 

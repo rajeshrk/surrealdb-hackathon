@@ -23,7 +23,7 @@ def get_customers() -> list[dict]:
     return run_sync(Q.get_all_customers(get_db()))
 
 
-def run_agent(customer_id: str, message: str) -> dict:
+def run_agent(customer_id: str, message: str, chat_history: list[dict] | None = None) -> dict:
     """Run the LangGraph agent for a given customer + message."""
     from agent.graph import build_journey_graph, make_run_config
 
@@ -31,10 +31,14 @@ def run_agent(customer_id: str, message: str) -> dict:
     graph = build_journey_graph(db)
     run_config = make_run_config(customer_id)
 
+    # Pass full conversation history so the agent can generate contextual responses
+    all_messages = list(chat_history or [])
+    all_messages.append({"role": "user", "content": message})
+
     initial_state = {
         "customer_id": customer_id,
         "user_message": message,
-        "messages": [{"role": "user", "content": message}],
+        "messages": all_messages,
     }
 
     result = run_sync(graph.ainvoke(initial_state, config=run_config))
@@ -116,7 +120,7 @@ if user_input := st.chat_input("Type a message…"):
     with st.chat_message("assistant"):
         with st.spinner("Thinking…"):
             try:
-                result = run_agent(customer_id, user_input)
+                result = run_agent(customer_id, user_input, st.session_state["messages"][:-1])
                 response = result.get("response_message", "I'm processing your request.")
                 requires_approval = result.get("requires_human_approval", False)
                 detected_events = result.get("detected_life_events", [])

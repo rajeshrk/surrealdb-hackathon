@@ -251,8 +251,9 @@ async def write_interaction(
             {sentiment_clause}
             created_at       = time::now()
         );
-        RELATE Customer:{cid}->had_interaction->$inode[0].id;
-        RETURN $inode[0].id;
+        LET $iid = $inode[0].id;
+        RELATE Customer:{cid}->had_interaction->$iid;
+        RETURN $iid;
         """,
         params,
     )
@@ -277,9 +278,9 @@ async def write_life_event(
             source      = $src,
             detected_at = time::now()
         );
-        RELATE Customer:{cid}->triggered->$ev[0].id
-            SET detected_via = $src;
-        RETURN $ev[0].id;
+        LET $evid = $ev[0].id;
+        RELATE Customer:{cid}->triggered->$evid SET detected_via = $src;
+        RETURN $evid;
         """,
         {"etype": event_type, "conf": confidence, "src": source},
     )
