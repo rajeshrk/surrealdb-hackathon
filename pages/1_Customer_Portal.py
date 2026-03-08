@@ -1,5 +1,8 @@
 """
 Customer Portal — chat interface that invokes the LangGraph agent.
+
+Multi-turn conversation: maintains chat history and previously recommended
+products in session state so the agent can provide contextual responses.
 """
 import streamlit as st
 
@@ -23,7 +26,12 @@ def get_customers() -> list[dict]:
     return run_sync(Q.get_all_customers(get_db()))
 
 
-def run_agent(customer_id: str, message: str, chat_history: list[dict] | None = None) -> dict:
+def run_agent(
+    customer_id: str,
+    message: str,
+    chat_history: list[dict] | None = None,
+    previously_recommended: list[str] | None = None,
+) -> dict:
     """Run the LangGraph agent for a given customer + message."""
     from agent.graph import build_journey_graph, make_run_config
 
@@ -39,6 +47,7 @@ def run_agent(customer_id: str, message: str, chat_history: list[dict] | None = 
         "customer_id": customer_id,
         "user_message": message,
         "messages": all_messages,
+        "previously_recommended": previously_recommended or [],
     }
 
     result = run_sync(graph.ainvoke(initial_state, config=run_config))
@@ -93,10 +102,13 @@ with st.sidebar:
 
 if st.session_state.get("last_customer") != customer_id:
     st.session_state["messages"] = []
+    st.session_state["previously_recommended"] = []
     st.session_state["last_customer"] = customer_id
 
 if "messages" not in st.session_state:
     st.session_state["messages"] = []
+if "previously_recommended" not in st.session_state:
+    st.session_state["previously_recommended"] = []
 
 # ── Graph evolution counter ───────────────────────────────────────────────
 
@@ -116,15 +128,26 @@ if user_input := st.chat_input("Type a message…"):
     with st.chat_message("user"):
         st.markdown(user_input)
 
-    # Run agent
+    # Run agent with full conversation context
     with st.chat_message("assistant"):
         with st.spinner("Thinking…"):
             try:
-                result = run_agent(customer_id, user_input, st.session_state["messages"][:-1])
+                result = run_agent(
+                    customer_id,
+                    user_input,
+                    chat_history=st.session_state["messages"][:-1],  # exclude current msg (passed separately)
+                    previously_recommended=st.session_state["previously_recommended"],
+                )
                 response = result.get("response_message", "I'm processing your request.")
                 requires_approval = result.get("requires_human_approval", False)
                 detected_events = result.get("detected_life_events", [])
                 compliance = result.get("compliance_result", {})
+
+                # Update previously_recommended from agent result
+                agent_prev = result.get("previously_recommended", [])
+                if agent_prev:
+                    st.session_state["previously_recommended"] = agent_prev
+
             except Exception as exc:
                 response = f"⚠️ Agent error: {exc}"
                 requires_approval = False
