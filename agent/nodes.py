@@ -148,9 +148,12 @@ def make_nodes(
         # Flatten profile (strip nested list fields)
         profile = {k: v for k, v in ctx.items() if not isinstance(v, list)}
         journey_states: list = ctx.get("journey_states") or []
-        current_phase = (
-            journey_states[0].get("phase", "active") if journey_states else "active"
-        )
+        current_phase = "active"
+        if journey_states:
+            js = journey_states[0]
+            if isinstance(js, dict):
+                current_phase = js.get("phase", "active")
+            # If js is a string (record ID), phase stays "active"
 
         # Enrich profile with multi-hop graph context
         profile["_interaction_product_trail"] = interaction_product_trail[:10]
