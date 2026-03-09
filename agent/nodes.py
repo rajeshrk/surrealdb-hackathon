@@ -143,14 +143,23 @@ def make_nodes(
             if isinstance(js, dict):
                 current_phase = js.get("phase", "active")
 
+        # Defensive: SurrealDB v2 graph traversal may return record ID strings instead of
+        # full objects if FETCH/subselect isn't used. Normalize to dicts.
+        def _as_dicts(items: list) -> list[dict]:
+            return [
+                {"id": p} if isinstance(p, str) else p
+                for p in items
+                if p is not None
+            ]
+
         # No LLM call here — intent classification is folded into eligibility_reasoner
         # to eliminate a redundant LLM round-trip (~2s saved)
 
         return {
             "customer_profile": profile,
-            "owned_products": ctx.get("owned_products") or [],
-            "life_events": ctx.get("life_events") or [],
-            "interaction_history": ctx.get("interactions") or [],
+            "owned_products": _as_dicts(ctx.get("owned_products") or []),
+            "life_events": _as_dicts(ctx.get("life_events") or []),
+            "interaction_history": _as_dicts(ctx.get("interactions") or []),
             "eligible_products": eligible,
             "relevant_documents": docs,
             "journey_phase": current_phase,

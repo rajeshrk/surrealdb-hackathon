@@ -31,16 +31,18 @@ async def get_customer_context(db: SurrealClient, customer_id: str) -> dict:
     """
     Single round-trip graph traversal: customer + owned products +
     life events + recent interactions + journey state.
+
+    Uses subselects to ensure graph traversal returns full objects, not just
+    record ID strings (SurrealDB v2 graph traversal returns IDs by default).
     """
     cid = _sanitize_id(customer_id)
     rows = await db.query(
         f"""
         SELECT *,
-            ->owns->Product AS owned_products,
-            ->triggered->LifeEvent AS life_events,
-            ->had_interaction->Interaction AS interactions,
-            ->has_journey->JourneyState AS journey_states,
-            ->eligible_for->Product AS eligible_products
+            (SELECT id, name, category, risk_level, requires_kyc, annual_fee FROM ->owns->Product) AS owned_products,
+            (SELECT id, event_type, confidence, detected_at, source FROM ->triggered->LifeEvent) AS life_events,
+            (SELECT id, interaction_type, content, sentiment, channel, created_at FROM ->had_interaction->Interaction ORDER BY created_at DESC LIMIT 10) AS interactions,
+            (SELECT id, phase, current_step, pending_approval FROM ->has_journey->JourneyState) AS journey_states
         FROM Customer:{cid}
         """
     )
