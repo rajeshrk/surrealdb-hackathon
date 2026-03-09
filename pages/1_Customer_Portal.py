@@ -15,11 +15,13 @@ st.title("💬 Customer Portal")
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 
-@st.cache_resource
 def get_db() -> SurrealClient:
-    db = run_sync(SurrealClient.connect())
-    run_sync(db.bootstrap())
-    return db
+    """Get the cached SurrealDB connection from session state."""
+    if "db" not in st.session_state:
+        db = run_sync(SurrealClient.connect())
+        run_sync(db.bootstrap())
+        st.session_state.db = db
+    return st.session_state.db
 
 
 def get_customers() -> list[dict]:
