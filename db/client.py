@@ -160,7 +160,7 @@ class SurrealClient:
         """Execute every statement in a .surql file."""
         import logging
         logger = logging.getLogger("surrealdb")
-        text = pathlib.Path(path).read_text()
+        text = pathlib.Path(path).read_text(encoding="utf-8")
         # Split on ';' but preserve semicolons inside strings is tricky;
         # we rely on statements being separated by ';\n'
         for stmt in text.split(";\n"):
