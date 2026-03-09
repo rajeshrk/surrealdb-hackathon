@@ -57,7 +57,7 @@ if "embeddings_seeded" not in st.session_state:
                     api_version=config.AZURE_OPENAI_API_VERSION,
                 )
                 docs = await db.query(
-                    "SELECT id, content FROM document WHERE embedding = []"
+                    "SELECT id, content FROM document WHERE embedding IS NONE"
                 )
                 for doc in docs:
                     doc_id = str(doc.get("id", "")).split(":")[-1]

@@ -13,50 +13,50 @@
 
 -- ── Products ─────────────────────────────────────────────────
 
-CREATE Product:checking SET name = 'Basic Checking', category = 'savings', risk_level = 'low', requires_kyc = false, cooling_off_days = 0;
-CREATE Product:savings_plus SET name = 'High-Yield Savings', category = 'savings', risk_level = 'low', requires_kyc = false, cooling_off_days = 7;
-CREATE Product:mortgage SET name = 'Home Mortgage', category = 'mortgage', risk_level = 'medium', requires_kyc = true, min_age = 21, cooling_off_days = 14;
-CREATE Product:life_insurance SET name = 'Term Life Insurance', category = 'insurance', risk_level = 'low', requires_kyc = true, cooling_off_days = 30;
-CREATE Product:edu_savings SET name = 'Education Savings Plan', category = 'savings', risk_level = 'low', requires_kyc = false, cooling_off_days = 0;
-CREATE Product:premium_mortgage SET name = 'Premium Fixed Mortgage', category = 'mortgage', risk_level = 'medium', requires_kyc = true, min_age = 21, cooling_off_days = 14;
-CREATE Product:home_insurance SET name = 'Home Insurance Plus', category = 'insurance', risk_level = 'low', requires_kyc = false, cooling_off_days = 0;
-CREATE Product:investment_portfolio SET name = 'Managed Investment Portfolio', category = 'investment', risk_level = 'high', requires_kyc = true, annual_fee = 750.0, cooling_off_days = 30;
-CREATE Product:basic_savings SET name = 'Basic Savings', category = 'savings', risk_level = 'low', requires_kyc = false, cooling_off_days = 0;
-CREATE Product:cd_account SET name = '12-Month CD', category = 'savings', risk_level = 'low', requires_kyc = false, cooling_off_days = 7;
-CREATE Product:retirement_plan SET name = 'Retirement Planning Service', category = 'investment', risk_level = 'medium', requires_kyc = true, annual_fee = 300.0, cooling_off_days = 14;
-CREATE Product:wealth_management SET name = 'Wealth Management Suite', category = 'investment', risk_level = 'high', requires_kyc = true, annual_fee = 1200.0, cooling_off_days = 30;
+UPSERT Product:checking SET name = 'Basic Checking', category = 'savings', risk_level = 'low', requires_kyc = false, cooling_off_days = 0;
+UPSERT Product:savings_plus SET name = 'High-Yield Savings', category = 'savings', risk_level = 'low', requires_kyc = false, cooling_off_days = 7;
+UPSERT Product:mortgage SET name = 'Home Mortgage', category = 'mortgage', risk_level = 'medium', requires_kyc = true, min_age = 21, cooling_off_days = 14;
+UPSERT Product:life_insurance SET name = 'Term Life Insurance', category = 'insurance', risk_level = 'low', requires_kyc = true, cooling_off_days = 30;
+UPSERT Product:edu_savings SET name = 'Education Savings Plan', category = 'savings', risk_level = 'low', requires_kyc = false, cooling_off_days = 0;
+UPSERT Product:premium_mortgage SET name = 'Premium Fixed Mortgage', category = 'mortgage', risk_level = 'medium', requires_kyc = true, min_age = 21, cooling_off_days = 14;
+UPSERT Product:home_insurance SET name = 'Home Insurance Plus', category = 'insurance', risk_level = 'low', requires_kyc = false, cooling_off_days = 0;
+UPSERT Product:investment_portfolio SET name = 'Managed Investment Portfolio', category = 'investment', risk_level = 'high', requires_kyc = true, annual_fee = 750.0, cooling_off_days = 30;
+UPSERT Product:basic_savings SET name = 'Basic Savings', category = 'savings', risk_level = 'low', requires_kyc = false, cooling_off_days = 0;
+UPSERT Product:cd_account SET name = '12-Month CD', category = 'savings', risk_level = 'low', requires_kyc = false, cooling_off_days = 7;
+UPSERT Product:retirement_plan SET name = 'Retirement Planning Service', category = 'investment', risk_level = 'medium', requires_kyc = true, annual_fee = 300.0, cooling_off_days = 14;
+UPSERT Product:wealth_management SET name = 'Wealth Management Suite', category = 'investment', risk_level = 'high', requires_kyc = true, annual_fee = 1200.0, cooling_off_days = 30;
 
 -- ── Compliance Rules ──────────────────────────────────────────
 
-CREATE ComplianceRule:kyc_fresh SET
+UPSERT ComplianceRule:kyc_fresh SET
     name = 'KYC Freshness Check',
     description = 'Customer KYC must be verified within the last 12 months for any product requiring KYC',
     enforcement = 'hard',
     active = true,
     conditions = { max_age_months: 12, applies_to: 'kyc_required_products' };
 
-CREATE ComplianceRule:risk_mismatch SET
+UPSERT ComplianceRule:risk_mismatch SET
     name = 'Risk Profile Mismatch',
     description = 'Products with risk level exceeding customer risk profile require advisor approval',
     enforcement = 'human_approval',
     active = true,
     conditions = { check: 'product.risk_level > customer.risk_profile' };
 
-CREATE ComplianceRule:high_value_crosssell SET
+UPSERT ComplianceRule:high_value_crosssell SET
     name = 'High-Value Cross-Sell Review',
     description = 'Cross-sell recommendations for products with annual fees over $500 are logged for audit',
     enforcement = 'audit_only',
     active = true,
     conditions = { annual_fee_threshold: 500 };
 
-CREATE ComplianceRule:cooling_off SET
+UPSERT ComplianceRule:cooling_off SET
     name = 'Product Cooling-Off Period',
     description = 'Cannot re-offer a product within its cooling-off period after customer rejection',
     enforcement = 'hard',
     active = true,
     conditions = { check: 'days_since_rejection < product.cooling_off_days' };
 
-CREATE ComplianceRule:vulnerable_customer SET
+UPSERT ComplianceRule:vulnerable_customer SET
     name = 'Vulnerable Customer Protection',
     description = 'Customers flagged as vulnerable require human approval for all product recommendations',
     enforcement = 'human_approval',
@@ -81,31 +81,31 @@ RELATE ComplianceRule:kyc_fresh->waived_by->Product:edu_savings SET reason = 'Ed
 
 -- ── Life Events ─────────────────────────────────────────────────
 
-CREATE LifeEvent:child_born_template SET
+UPSERT LifeEvent:child_born_template SET
     event_type = 'child_born',
     detected_at = time::now() - 1y,
     confidence = 1.0,
     source = 'template';
 
-CREATE LifeEvent:home_purchase_template SET
+UPSERT LifeEvent:home_purchase_template SET
     event_type = 'home_purchase',
     detected_at = time::now() - 1y,
     confidence = 1.0,
     source = 'template';
 
-CREATE LifeEvent:marriage_template SET
+UPSERT LifeEvent:marriage_template SET
     event_type = 'marriage',
     detected_at = time::now() - 1y,
     confidence = 1.0,
     source = 'template';
 
-CREATE LifeEvent:retirement_planning_template SET
+UPSERT LifeEvent:retirement_planning_template SET
     event_type = 'retirement_planning',
     detected_at = time::now() - 1y,
     confidence = 1.0,
     source = 'template';
 
-CREATE LifeEvent:job_change_template SET
+UPSERT LifeEvent:job_change_template SET
     event_type = 'job_change',
     detected_at = time::now() - 1y,
     confidence = 1.0,
@@ -141,7 +141,7 @@ RELATE LifeEvent:job_change_template->unlocks->Product:checking SET relevance = 
 -- Persona 1: Sarah Chen — New-to-Bank Millennial
 -- ══════════════════════════════════════════════════════════════
 
-CREATE Customer:sarah SET
+UPSERT Customer:sarah SET
     name = 'Sarah Chen',
     age = 29,
     risk_profile = 'moderate',
@@ -161,7 +161,7 @@ RELATE Customer:sarah->eligible_for->Product:life_insurance SET score = 0.65, re
 RELATE Customer:sarah->eligible_for->Product:edu_savings SET score = 0.50, reason = 'Pre-family planning eligibility';
 
 -- Customer -> has_journey -> JourneyState
-CREATE JourneyState:sarah_journey SET
+UPSERT JourneyState:sarah_journey SET
     customer_id = 'Customer:sarah',
     phase = 'active',
     current_step = 'idle',
@@ -172,14 +172,14 @@ CREATE JourneyState:sarah_journey SET
 RELATE Customer:sarah->has_journey->JourneyState:sarah_journey;
 
 -- Customer -> had_interaction -> Interaction -> about_product -> Product
-CREATE Interaction:sarah_i1 SET
+UPSERT Interaction:sarah_i1 SET
     interaction_type = 'inquiry',
     channel = 'app',
     content = 'Asked about savings account options',
     sentiment = 'positive',
     created_at = time::now() - 14d;
 
-CREATE Interaction:sarah_i2 SET
+UPSERT Interaction:sarah_i2 SET
     interaction_type = 'engagement',
     channel = 'app',
     content = 'Explored mortgage calculator on website',
@@ -192,7 +192,7 @@ RELATE Interaction:sarah_i1->about_product->Product:savings_plus;
 RELATE Interaction:sarah_i2->about_product->Product:mortgage;
 
 -- JourneyState -> has_decision -> DecisionLog (past agent decisions)
-CREATE DecisionLog:sarah_d1 SET
+UPSERT DecisionLog:sarah_d1 SET
     customer_id = 'Customer:sarah',
     action_taken = 'inform',
     agent_reasoning = 'Customer browsing savings options. Provided information about High-Yield Savings.',
@@ -210,7 +210,7 @@ RELATE JourneyState:sarah_journey->has_decision->DecisionLog:sarah_d1;
 -- Persona 2: James Morrison — Existing Mortgage / Wealth
 -- ══════════════════════════════════════════════════════════════
 
-CREATE Customer:james SET
+UPSERT Customer:james SET
     name = 'James Morrison',
     age = 42,
     risk_profile = 'moderate',
@@ -230,7 +230,7 @@ RELATE Customer:james->eligible_for->Product:wealth_management SET score = 0.55,
 RELATE Customer:james->eligible_for->Product:life_insurance SET score = 0.70, reason = 'Mortgage holder should have life coverage';
 
 -- Customer -> has_journey -> JourneyState
-CREATE JourneyState:james_journey SET
+UPSERT JourneyState:james_journey SET
     customer_id = 'Customer:james',
     phase = 'cross_sell',
     current_step = 'idle',
@@ -241,14 +241,14 @@ CREATE JourneyState:james_journey SET
 RELATE Customer:james->has_journey->JourneyState:james_journey;
 
 -- Customer -> had_interaction -> Interaction -> about_product -> Product
-CREATE Interaction:james_i1 SET
+UPSERT Interaction:james_i1 SET
     interaction_type = 'inquiry',
     channel = 'advisor',
     content = 'Discussed investment options with advisor',
     sentiment = 'positive',
     created_at = time::now() - 30d;
 
-CREATE Interaction:james_i2 SET
+UPSERT Interaction:james_i2 SET
     interaction_type = 'engagement',
     channel = 'app',
     content = 'Reviewed home insurance quotes online',
@@ -261,7 +261,7 @@ RELATE Interaction:james_i1->about_product->Product:investment_portfolio;
 RELATE Interaction:james_i2->about_product->Product:home_insurance;
 
 -- JourneyState -> has_decision -> DecisionLog
-CREATE DecisionLog:james_d1 SET
+UPSERT DecisionLog:james_d1 SET
     customer_id = 'Customer:james',
     action_taken = 'escalate',
     agent_reasoning = 'Customer interested in investments but KYC expired. Escalated to advisor for KYC renewal.',
@@ -279,7 +279,7 @@ RELATE JourneyState:james_journey->has_decision->DecisionLog:james_d1;
 -- Persona 3: Maria Santos — At-Risk Retention
 -- ══════════════════════════════════════════════════════════════
 
-CREATE Customer:maria SET
+UPSERT Customer:maria SET
     name = 'Maria Santos',
     age = 55,
     risk_profile = 'conservative',
@@ -298,7 +298,7 @@ RELATE Customer:maria->eligible_for->Product:retirement_plan SET score = 0.80, r
 RELATE Customer:maria->eligible_for->Product:savings_plus SET score = 0.60, reason = 'Could upgrade from basic savings for better yield';
 
 -- Customer -> triggered -> LifeEvent (Maria is actively thinking about retirement)
-CREATE LifeEvent:maria_retirement SET
+UPSERT LifeEvent:maria_retirement SET
     event_type = 'retirement_planning',
     detected_at = time::now() - 60d,
     confidence = 0.70,
@@ -307,7 +307,7 @@ CREATE LifeEvent:maria_retirement SET
 RELATE Customer:maria->triggered->LifeEvent:maria_retirement SET detected_via = 'transaction_pattern';
 
 -- Customer -> has_journey -> JourneyState
-CREATE JourneyState:maria_journey SET
+UPSERT JourneyState:maria_journey SET
     customer_id = 'Customer:maria',
     phase = 'retention',
     current_step = 'idle',
@@ -318,21 +318,21 @@ CREATE JourneyState:maria_journey SET
 RELATE Customer:maria->has_journey->JourneyState:maria_journey;
 
 -- Customer -> had_interaction -> Interaction -> about_product -> Product
-CREATE Interaction:maria_i1 SET
+UPSERT Interaction:maria_i1 SET
     interaction_type = 'inquiry',
     channel = 'email',
     content = 'Asked about closing account',
     sentiment = 'negative',
     created_at = time::now() - 30d;
 
-CREATE Interaction:maria_i2 SET
+UPSERT Interaction:maria_i2 SET
     interaction_type = 'rejection',
     channel = 'email',
     content = 'Declined CD offer',
     sentiment = 'negative',
     created_at = time::now() - 14d;
 
-CREATE Interaction:maria_i3 SET
+UPSERT Interaction:maria_i3 SET
     interaction_type = 'inquiry',
     channel = 'email',
     content = 'Asked about retirement savings options',
@@ -347,7 +347,7 @@ RELATE Interaction:maria_i2->about_product->Product:cd_account;
 RELATE Interaction:maria_i3->about_product->Product:retirement_plan;
 
 -- JourneyState -> has_decision -> DecisionLog
-CREATE DecisionLog:maria_d1 SET
+UPSERT DecisionLog:maria_d1 SET
     customer_id = 'Customer:maria',
     action_taken = 'recommend',
     agent_reasoning = 'Long-tenure customer showing churn signals. Recommended CD account for better yield.',
@@ -359,7 +359,7 @@ CREATE DecisionLog:maria_d1 SET
     reviewed = true,
     created_at = time::now() - 14d;
 
-CREATE DecisionLog:maria_d2 SET
+UPSERT DecisionLog:maria_d2 SET
     customer_id = 'Customer:maria',
     action_taken = 'retain',
     agent_reasoning = 'Customer declined CD. Detected retirement interest from transaction patterns. Pivoting to retention with retirement planning.',
@@ -379,61 +379,61 @@ RELATE JourneyState:maria_journey->has_decision->DecisionLog:maria_d2;
 -- ══════════════════════════════════════════════════════════════
 
 -- ── Devices ────────────────────────────────────────────────────
-CREATE Device:dev_sarah_iphone SET
+UPSERT Device:dev_sarah_iphone SET
     device_fingerprint = 'fp_a1b2c3d4e5_iphone14',
     device_type = 'mobile', os = 'iOS 17', browser = 'Safari',
     first_seen = time::now() - 180d, last_seen = time::now() - 1d, risk_score = 0.0;
 
-CREATE Device:dev_sarah_macbook SET
+UPSERT Device:dev_sarah_macbook SET
     device_fingerprint = 'fp_f6g7h8i9j0_macbook',
     device_type = 'desktop', os = 'macOS 14', browser = 'Chrome',
     first_seen = time::now() - 150d, last_seen = time::now() - 3d, risk_score = 0.0;
 
-CREATE Device:dev_james_desktop SET
+UPSERT Device:dev_james_desktop SET
     device_fingerprint = 'fp_k1l2m3n4o5_win11',
     device_type = 'desktop', os = 'Windows 11', browser = 'Edge',
     first_seen = time::now() - 2y, last_seen = time::now() - 1d, risk_score = 0.1;
 
-CREATE Device:dev_james_tablet SET
+UPSERT Device:dev_james_tablet SET
     device_fingerprint = 'fp_p6q7r8s9t0_ipad',
     device_type = 'tablet', os = 'iPadOS 17', browser = 'Safari',
     first_seen = time::now() - 1y, last_seen = time::now() - 7d, risk_score = 0.0;
 
-CREATE Device:dev_maria_android SET
+UPSERT Device:dev_maria_android SET
     device_fingerprint = 'fp_u1v2w3x4y5_pixel',
     device_type = 'mobile', os = 'Android 14', browser = 'Chrome',
     first_seen = time::now() - 3y, last_seen = time::now() - 2d, risk_score = 0.0;
 
 -- Suspicious shared device (James's desktop also used by unknown pattern)
-CREATE Device:dev_suspicious_shared SET
+UPSERT Device:dev_suspicious_shared SET
     device_fingerprint = 'fp_z9y8x7w6v5_shared',
     device_type = 'desktop', os = 'Windows 10', browser = 'Firefox',
     first_seen = time::now() - 30d, last_seen = time::now() - 1d, risk_score = 0.75;
 
 -- ── IP Addresses ───────────────────────────────────────────────
-CREATE IPAddress:ip_sarah_home SET
+UPSERT IPAddress:ip_sarah_home SET
     ip = '203.0.113.10', geo_country = 'US', geo_city = 'San Francisco',
     is_vpn = false, is_tor = false, risk_score = 0.0, first_seen = time::now() - 180d;
 
-CREATE IPAddress:ip_james_home SET
+UPSERT IPAddress:ip_james_home SET
     ip = '198.51.100.22', geo_country = 'US', geo_city = 'New York',
     is_vpn = false, is_tor = false, risk_score = 0.0, first_seen = time::now() - 2y;
 
-CREATE IPAddress:ip_james_office SET
+UPSERT IPAddress:ip_james_office SET
     ip = '198.51.100.50', geo_country = 'US', geo_city = 'New York',
     is_vpn = false, is_tor = false, risk_score = 0.0, first_seen = time::now() - 1y;
 
-CREATE IPAddress:ip_maria_home SET
+UPSERT IPAddress:ip_maria_home SET
     ip = '192.0.2.88', geo_country = 'US', geo_city = 'Miami',
     is_vpn = false, is_tor = false, risk_score = 0.0, first_seen = time::now() - 3y;
 
 -- Suspicious: VPN IP used with James's account
-CREATE IPAddress:ip_suspicious_vpn SET
+UPSERT IPAddress:ip_suspicious_vpn SET
     ip = '10.255.0.99', geo_country = 'RO', geo_city = 'Bucharest',
     is_vpn = true, is_tor = false, risk_score = 0.80, first_seen = time::now() - 5d;
 
 -- Suspicious: Tor exit node
-CREATE IPAddress:ip_tor_exit SET
+UPSERT IPAddress:ip_tor_exit SET
     ip = '10.255.0.200', geo_country = 'DE', geo_city = 'Frankfurt',
     is_vpn = false, is_tor = true, risk_score = 0.95, first_seen = time::now() - 2d;
 
@@ -472,7 +472,7 @@ RELATE Customer:james->linked_identity->Customer:sarah SET
     detected_at = time::now() - 60d;
 
 -- ── Fraud Alerts (pre-seeded for demo) ─────────────────────────
-CREATE FraudAlert:alert_james_vpn SET
+UPSERT FraudAlert:alert_james_vpn SET
     customer_id = 'Customer:james',
     alert_type = 'vpn_tor',
     severity = 'medium',
@@ -481,7 +481,7 @@ CREATE FraudAlert:alert_james_vpn SET
     status = 'open',
     created_at = time::now() - 5d;
 
-CREATE FraudAlert:alert_james_device SET
+UPSERT FraudAlert:alert_james_device SET
     customer_id = 'Customer:james',
     alert_type = 'shared_device',
     severity = 'high',
@@ -492,38 +492,32 @@ CREATE FraudAlert:alert_james_device SET
 
 -- ── Seed Documents (embeddings populated at startup) ─────────
 
-CREATE document:policy_kyc SET
+UPSERT document:policy_kyc SET
     title = 'KYC Policy 2024',
     doc_type = 'policy',
-    content = 'All customers must complete Know Your Customer verification before being offered investment, insurance, or mortgage products. KYC verification expires after 12 months and must be renewed. Exceptions may apply for existing product holders upgrading within the same product category.',
-    embedding = [];
+    content = 'All customers must complete Know Your Customer verification before being offered investment, insurance, or mortgage products. KYC verification expires after 12 months and must be renewed. Exceptions may apply for existing product holders upgrading within the same product category.';
 
-CREATE document:product_mortgage SET
+UPSERT document:product_mortgage SET
     title = 'Home Mortgage Product Brief',
     doc_type = 'product_brief',
-    content = 'The Home Mortgage product requires verified KYC, minimum age 21, stable income verification, and a credit score assessment. Pre-qualification is available for existing savings customers with 6+ months of deposit history. Fixed and variable rate options available with terms from 15 to 30 years.',
-    embedding = [];
+    content = 'The Home Mortgage product requires verified KYC, minimum age 21, stable income verification, and a credit score assessment. Pre-qualification is available for existing savings customers with 6+ months of deposit history. Fixed and variable rate options available with terms from 15 to 30 years.';
 
-CREATE document:regulation_consumer SET
+UPSERT document:regulation_consumer SET
     title = 'Consumer Protection Regulation Summary',
     doc_type = 'regulation',
-    content = 'Financial institutions must ensure product recommendations are suitable for the customer risk profile. Conservative-profile customers should not be offered high-risk investment products without explicit advisor consultation. All cross-sell activities must be logged with reasoning for regulatory audit purposes.',
-    embedding = [];
+    content = 'Financial institutions must ensure product recommendations are suitable for the customer risk profile. Conservative-profile customers should not be offered high-risk investment products without explicit advisor consultation. All cross-sell activities must be logged with reasoning for regulatory audit purposes.';
 
-CREATE document:product_insurance SET
+UPSERT document:product_insurance SET
     title = 'Life Insurance Product Brief',
     doc_type = 'product_brief',
-    content = 'Term Life Insurance is suitable for customers with dependents or significant financial obligations. Triggered by life events such as childbirth, marriage, or home purchase. Requires verified KYC. Coverage amounts from $100k to $2M. Premiums are age-dependent and locked at policy inception.',
-    embedding = [];
+    content = 'Term Life Insurance is suitable for customers with dependents or significant financial obligations. Triggered by life events such as childbirth, marriage, or home purchase. Requires verified KYC. Coverage amounts from $100k to $2M. Premiums are age-dependent and locked at policy inception.';
 
-CREATE document:product_edu_savings SET
+UPSERT document:product_edu_savings SET
     title = 'Education Savings Plan Brief',
     doc_type = 'product_brief',
-    content = 'The Education Savings Plan helps parents save for their children\'s higher education expenses. Tax-advantaged contributions up to $2,500 per year. Best suited for customers who have recently had children or have children under 10 years old. No KYC requirement for basic tier.',
-    embedding = [];
+    content = 'The Education Savings Plan helps parents save for their children\'s higher education expenses. Tax-advantaged contributions up to $2,500 per year. Best suited for customers who have recently had children or have children under 10 years old. No KYC requirement for basic tier.';
 
-CREATE document:advisor_retention SET
+UPSERT document:advisor_retention SET
     title = 'Retention Strategy Advisor Note',
     doc_type = 'advisor_note',
-    content = 'Customers showing negative sentiment in two or more consecutive interactions within 60 days should be flagged for retention intervention. Effective retention offers include fee waivers, rate upgrades on existing products, or complementary service access. High-tenure customers (5+ years) should receive priority advisor contact.',
-    embedding = [];
+    content = 'Customers showing negative sentiment in two or more consecutive interactions within 60 days should be flagged for retention intervention. Effective retention offers include fee waivers, rate upgrades on existing products, or complementary service access. High-tenure customers (5+ years) should receive priority advisor contact.';

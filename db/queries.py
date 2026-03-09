@@ -36,13 +36,12 @@ async def get_customer_context(db: SurrealClient, customer_id: str) -> dict:
     rows = await db.query(
         f"""
         SELECT *,
-            ->owns->(Product AS product) AS owned_products,
-            ->triggered->(LifeEvent AS event) AS life_events,
-            ->had_interaction->(Interaction AS interaction) AS interactions,
-            ->has_journey->(JourneyState AS journey) AS journey_states,
-            ->eligible_for AS eligible_edges
+            ->owns->Product AS owned_products,
+            ->triggered->LifeEvent AS life_events,
+            ->had_interaction->Interaction AS interactions,
+            ->has_journey->JourneyState AS journey_states,
+            ->eligible_for->Product AS eligible_products
         FROM Customer:{cid}
-        FETCH owned_products, life_events, interactions, journey_states
         """
     )
     return rows[0] if rows else {}
@@ -203,12 +202,16 @@ async def get_graph_for_viz(db: SurrealClient, customer_id: str) -> dict:
     )
     blocked = await db.query(
         f"""
-        SELECT p.name AS product_name, p.id AS product_id, cr.name AS rule_name, cr.id AS rule_id, bb.block_reason
-        FROM blocked_by AS bb
-        INNER JOIN Product AS p ON bb.in = p.id
-        INNER JOIN ComplianceRule AS cr ON bb.out = cr.id
-        WHERE bb.in IN (SELECT out FROM owns WHERE in = Customer:{cid})
-           OR bb.in IN (SELECT out FROM eligible_for WHERE in = Customer:{cid})
+        SELECT
+            in AS product_id,
+            in.name AS product_name,
+            out AS rule_id,
+            out.name AS rule_name,
+            block_reason
+        FROM blocked_by
+        WHERE in IN (SELECT VALUE out FROM owns WHERE in = Customer:{cid})
+           OR in IN (SELECT VALUE out FROM eligible_for WHERE in = Customer:{cid})
+        FETCH in, out
         """
     )
     return {
@@ -251,24 +254,21 @@ async def get_customer_product_compliance_chain(db: SurrealClient, customer_id: 
     """
     Customer -> eligible_for -> Product -> blocked_by -> ComplianceRule
     For each eligible product, find which compliance rules block it.
-    Returns the full 4-node chain for graph visualization and reasoning.
+    Uses clean SurrealDB v2 graph traversal syntax.
     """
     cid = _sanitize_id(customer_id)
     return await db.query(
         f"""
         SELECT
-            ef.out.id    AS product_id,
-            ef.out.name  AS product_name,
-            ef.score     AS eligibility_score,
-            bb.out.id    AS rule_id,
-            bb.out.name  AS rule_name,
-            bb.block_reason AS block_reason,
-            bb.out.enforcement AS enforcement
-        FROM eligible_for AS ef
-        WHERE ef.in = Customer:{cid}
-        AND ef.out IN (SELECT in FROM blocked_by)
-        SPLIT bb
-        LET bb = (SELECT * FROM blocked_by WHERE in = ef.out)
+            in AS product_id,
+            in.name AS product_name,
+            out AS rule_id,
+            out.name AS rule_name,
+            out.enforcement AS enforcement,
+            block_reason
+        FROM blocked_by
+        WHERE in IN (SELECT VALUE out FROM eligible_for WHERE in = Customer:{cid})
+        FETCH in, out
         """
     )
 
@@ -276,25 +276,22 @@ async def get_customer_product_compliance_chain(db: SurrealClient, customer_id: 
 async def get_customer_interaction_product_trail(db: SurrealClient, customer_id: str) -> list[dict]:
     """
     Customer -> had_interaction -> Interaction -> about_product -> Product
-    Returns the 4-node chain showing what products the customer has discussed.
+    Returns the chain showing what products the customer has discussed.
+    Uses clean SurrealDB v2 graph traversal: start from Interaction records.
     """
     cid = _sanitize_id(customer_id)
     return await db.query(
         f"""
         SELECT
-            hi.out.interaction_type AS interaction_type,
-            hi.out.content AS interaction_content,
-            hi.out.sentiment AS sentiment,
-            hi.out.created_at AS interaction_date,
-            ap.out.id AS product_id,
-            ap.out.name AS product_name,
-            ap.out.category AS product_category
-        FROM had_interaction AS hi
-        WHERE hi.in = Customer:{cid}
-        AND hi.out IN (SELECT in FROM about_product)
-        SPLIT ap
-        LET ap = (SELECT * FROM about_product WHERE in = hi.out)
-        ORDER BY interaction_date DESC
+            interaction_type,
+            content AS interaction_content,
+            sentiment,
+            created_at AS interaction_date,
+            ->about_product->Product.id AS product_id,
+            ->about_product->Product.name AS product_name,
+            ->about_product->Product.category AS product_category
+        FROM Customer:{cid}->had_interaction->Interaction
+        ORDER BY created_at DESC
         """
     )
 
@@ -303,26 +300,22 @@ async def get_customer_journey_decision_trail(db: SurrealClient, customer_id: st
     """
     Customer -> has_journey -> JourneyState -> has_decision -> DecisionLog
     Returns the full audit trail of agent decisions through the journey.
+    Uses clean SurrealDB v2 graph traversal syntax.
     """
     cid = _sanitize_id(customer_id)
     return await db.query(
         f"""
         SELECT
-            js.phase AS journey_phase,
-            js.current_step AS current_step,
-            dl.action_taken AS action_taken,
-            dl.agent_reasoning AS agent_reasoning,
-            dl.confidence_score AS confidence,
-            dl.compliance_gates_passed AS gates_passed,
-            dl.compliance_gates_failed AS gates_failed,
-            dl.requires_human_review AS needs_review,
-            dl.created_at AS decision_date
-        FROM has_journey AS hj
-        WHERE hj.in = Customer:{cid}
-        SPLIT hd
-        LET js = hj.out
-        LET hd = (SELECT * FROM has_decision WHERE in = js.id)
-        LET dl = hd.out
+            phase AS journey_phase,
+            current_step,
+            ->has_decision->DecisionLog.action_taken AS action_taken,
+            ->has_decision->DecisionLog.agent_reasoning AS agent_reasoning,
+            ->has_decision->DecisionLog.confidence_score AS confidence,
+            ->has_decision->DecisionLog.compliance_gates_passed AS gates_passed,
+            ->has_decision->DecisionLog.compliance_gates_failed AS gates_failed,
+            ->has_decision->DecisionLog.requires_human_review AS needs_review,
+            ->has_decision->DecisionLog.created_at AS decision_date
+        FROM Customer:{cid}->has_journey->JourneyState
         ORDER BY decision_date DESC
         """
     )
@@ -385,23 +378,43 @@ async def get_fraud_signals(db: SurrealClient, customer_id: str) -> list[dict]:
         })
 
     # 2. Shared device detection (Customer -> used_device -> Device <- used_device <- OtherCustomer)
-    shared_devices = await db.query(
+    # First get this customer's devices
+    my_devices = await db.query(
         f"""
         SELECT
-            ud1.out.id AS device_id,
-            ud1.out.device_type AS device_type,
-            ud1.out.risk_score AS device_risk,
-            ud2.in.id AS other_customer_id,
-            ud2.in.name AS other_customer_name
-        FROM used_device AS ud1
-        WHERE ud1.in = Customer:{cid}
-        AND ud1.out IN (
-            SELECT out FROM used_device WHERE in != Customer:{cid}
-        )
-        SPLIT ud2
-        LET ud2 = (SELECT * FROM used_device WHERE out = ud1.out AND in != Customer:{cid} FETCH in)
+            out AS device_id,
+            out.device_type AS device_type,
+            out.risk_score AS device_risk
+        FROM used_device
+        WHERE in = Customer:{cid}
+        FETCH out
         """
     )
+    # Then find other customers who share those devices
+    shared_devices = []
+    for dev in my_devices:
+        dev_id = dev.get("device_id", "")
+        if not dev_id:
+            continue
+        others = await db.query(
+            f"""
+            SELECT
+                in AS other_customer_id,
+                in.name AS other_customer_name,
+                session_count
+            FROM used_device
+            WHERE out = {dev_id} AND in != Customer:{cid}
+            FETCH in
+            """
+        )
+        for other in others:
+            shared_devices.append({
+                "device_id": dev_id,
+                "device_type": dev.get("device_type"),
+                "device_risk": dev.get("device_risk", 0),
+                "other_customer_id": other.get("other_customer_id"),
+                "other_customer_name": other.get("other_customer_name"),
+            })
     for sd in shared_devices:
         signals.append({
             "signal_type": "shared_device",
@@ -431,24 +444,40 @@ async def get_fraud_signals(db: SurrealClient, customer_id: str) -> list[dict]:
         })
 
     # 4. Device -> suspicious IP chain (Customer -> used_device -> Device -> device_seen_ip -> IPAddress)
+    # Use graph traversal: start from customer's devices, traverse to suspicious IPs
     device_ip_chain = await db.query(
         f"""
         SELECT
-            ud.out.id AS device_id,
-            dip.out.ip AS ip,
-            dip.out.is_vpn AS is_vpn,
-            dip.out.is_tor AS is_tor,
-            dip.out.risk_score AS ip_risk,
-            dip.out.geo_country AS country
-        FROM used_device AS ud
-        WHERE ud.in = Customer:{cid}
-        AND ud.out IN (
-            SELECT in FROM device_seen_ip WHERE out.risk_score > 0.5 OR out.is_tor = true
-        )
-        SPLIT dip
-        LET dip = (SELECT * FROM device_seen_ip WHERE in = ud.out AND (out.risk_score > 0.5 OR out.is_tor = true) FETCH out)
+            id AS device_id,
+            ->device_seen_ip->IPAddress.ip AS ip,
+            ->device_seen_ip->IPAddress.is_vpn AS is_vpn,
+            ->device_seen_ip->IPAddress.is_tor AS is_tor,
+            ->device_seen_ip->IPAddress.risk_score AS ip_risk,
+            ->device_seen_ip->IPAddress.geo_country AS country
+        FROM Customer:{cid}->used_device->Device
+        WHERE ->device_seen_ip->IPAddress.risk_score CONTAINSANY [true]
+           OR ->device_seen_ip->IPAddress.is_tor CONTAINSANY [true]
         """
     )
+    # Flatten: the traversal returns arrays, so normalize
+    normalized_chains: list[dict] = []
+    for dev in device_ip_chain:
+        ips_list = dev.get("ip") or []
+        if isinstance(ips_list, list):
+            for i, ip_val in enumerate(ips_list):
+                risk = (dev.get("ip_risk") or [0])[i] if isinstance(dev.get("ip_risk"), list) and i < len(dev.get("ip_risk", [])) else 0
+                is_tor_val = (dev.get("is_tor") or [False])[i] if isinstance(dev.get("is_tor"), list) and i < len(dev.get("is_tor", [])) else False
+                is_vpn_val = (dev.get("is_vpn") or [False])[i] if isinstance(dev.get("is_vpn"), list) and i < len(dev.get("is_vpn", [])) else False
+                if (risk or 0) > 0.5 or is_tor_val:
+                    normalized_chains.append({
+                        "device_id": dev.get("device_id"),
+                        "ip": ip_val,
+                        "is_vpn": is_vpn_val,
+                        "is_tor": is_tor_val,
+                        "ip_risk": risk,
+                        "country": (dev.get("country") or [""])[i] if isinstance(dev.get("country"), list) and i < len(dev.get("country", [])) else "",
+                    })
+    device_ip_chain = normalized_chains
     for chain in device_ip_chain:
         signals.append({
             "signal_type": "device_ip_anomaly",
@@ -565,39 +594,33 @@ async def get_full_customer_graph(db: SurrealClient, customer_id: str) -> dict:
         f"SELECT out.id, out.name, out.category, score, reason FROM eligible_for WHERE in = Customer:{cid} FETCH out"
     )
 
-    # 3. Customer -> triggered -> LifeEvent -> unlocks -> Product (2-hop)
+    # 3. Customer -> triggered -> LifeEvent -> unlocks -> Product (2-hop graph traversal)
     life_event_chains = await db.query(
         f"""
         SELECT
-            tr.out.event_type AS event_type,
-            tr.out.confidence AS confidence,
-            tr.out.detected_at AS detected_at,
-            tr.detected_via AS source,
-            ul.out.id AS unlocked_product_id,
-            ul.out.name AS unlocked_product_name,
-            ul.relevance AS product_relevance
-        FROM triggered AS tr
-        WHERE tr.in = Customer:{cid}
-        SPLIT ul
-        LET ul = (SELECT * FROM unlocks WHERE in = tr.out FETCH out)
+            event_type,
+            confidence,
+            detected_at,
+            source,
+            ->unlocks->Product.id AS unlocked_product_id,
+            ->unlocks->Product.name AS unlocked_product_name,
+            ->unlocks.relevance AS product_relevance
+        FROM Customer:{cid}->triggered->LifeEvent
         """
     )
 
-    # 4. Customer -> had_interaction -> Interaction -> about_product -> Product (2-hop)
+    # 4. Customer -> had_interaction -> Interaction -> about_product -> Product (2-hop graph traversal)
     interaction_chains = await db.query(
         f"""
         SELECT
-            hi.out.interaction_type AS type,
-            hi.out.content AS content,
-            hi.out.sentiment AS sentiment,
-            hi.out.created_at AS date,
-            ap.out.id AS product_id,
-            ap.out.name AS product_name
-        FROM had_interaction AS hi
-        WHERE hi.in = Customer:{cid}
-        SPLIT ap
-        LET ap = (SELECT * FROM about_product WHERE in = hi.out FETCH out)
-        ORDER BY date DESC
+            interaction_type AS type,
+            content,
+            sentiment,
+            created_at AS date,
+            ->about_product->Product.id AS product_id,
+            ->about_product->Product.name AS product_name
+        FROM Customer:{cid}->had_interaction->Interaction
+        ORDER BY created_at DESC
         """
     )
 
@@ -626,21 +649,18 @@ async def get_full_customer_graph(db: SurrealClient, customer_id: str) -> dict:
         "SELECT in AS rule_id, in.name AS rule_name, out AS product_id, reason FROM waived_by FETCH in"
     )
 
-    # 8. Customer -> has_journey -> JourneyState -> has_decision -> DecisionLog (2-hop)
+    # 8. Customer -> has_journey -> JourneyState -> has_decision -> DecisionLog (2-hop graph traversal)
     journey_chains = await db.query(
         f"""
         SELECT
-            hj.out.phase AS phase,
-            hj.out.current_step AS step,
-            hj.out.pending_approval AS pending,
-            hd.out.action_taken AS decision_action,
-            hd.out.agent_reasoning AS decision_reasoning,
-            hd.out.confidence_score AS decision_confidence,
-            hd.out.created_at AS decision_date
-        FROM has_journey AS hj
-        WHERE hj.in = Customer:{cid}
-        SPLIT hd
-        LET hd = (SELECT * FROM has_decision WHERE in = hj.out FETCH out)
+            phase,
+            current_step AS step,
+            pending_approval AS pending,
+            ->has_decision->DecisionLog.action_taken AS decision_action,
+            ->has_decision->DecisionLog.agent_reasoning AS decision_reasoning,
+            ->has_decision->DecisionLog.confidence_score AS decision_confidence,
+            ->has_decision->DecisionLog.created_at AS decision_date
+        FROM Customer:{cid}->has_journey->JourneyState
         ORDER BY decision_date DESC
         """
     )
@@ -992,7 +1012,7 @@ async def vector_search_documents(
     db: SurrealClient, query_embedding: list[float], limit: int = 5
 ) -> list[dict]:
     return await db.query(
-        "SELECT id, title, content, doc_type, vector::similarity::cosine(embedding, $emb) AS score FROM document WHERE embedding != [] ORDER BY score DESC LIMIT $lim",
+        "SELECT id, title, content, doc_type, vector::similarity::cosine(embedding, $emb) AS score FROM document WHERE embedding IS NOT NONE ORDER BY score DESC LIMIT $lim",
         {"emb": query_embedding, "lim": limit},
     )
 

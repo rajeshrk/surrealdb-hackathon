@@ -9,32 +9,55 @@ An agentic system that dynamically re-orchestrates a customer's financial servic
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│  Layer 1: SurrealDB (graph + relational + vector)            │
-│  • Customer, Product, LifeEvent, ComplianceRule nodes        │
-│  • owns, eligible_for, blocked_by, triggered edges           │
-│  • document table with MTREE vector index (1536-dim)         │
-│  • JourneyState stores LangGraph checkpoints                 │
-└───────────────────────┬──────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│  Layer 1: SurrealDB Cloud v2 (graph + relational + vector)           │
+│                                                                      │
+│  Node Tables:                                                        │
+│    Customer, Product, LifeEvent, ComplianceRule, Interaction,        │
+│    JourneyState, DecisionLog, ApprovalRequest,                       │
+│    Device, IPAddress, FraudAlert, document                           │
+│                                                                      │
+│  Graph Edges (TYPE RELATION):                                        │
+│    owns, eligible_for, blocked_by, requires_approval, waived_by,     │
+│    triggered, unlocks, had_interaction, about_product,               │
+│    has_journey, has_decision,                                        │
+│    used_device, from_ip, device_seen_ip, linked_identity             │
+│                                                                      │
+│  Vector: MTREE index (1536-dim cosine) on document.embedding         │
+│  Graph Traversal: ->edge->Node.field syntax for multi-hop queries    │
+└───────────────────────┬──────────────────────────────────────────────┘
                         │
-┌───────────────────────▼──────────────────────────────────────┐
-│  Layer 2: LangGraph StateGraph (6 nodes)                     │
-│  context_loader → eligibility_reasoner → compliance_gate     │
-│       ↓ (passed)          ↓ (blocked/needs_approval)         │
-│  action_selector → channel_router → graph_updater            │
-└───────────────────────┬──────────────────────────────────────┘
+┌───────────────────────▼──────────────────────────────────────────────┐
+│  Layer 2: LangGraph StateGraph (6 nodes)                             │
+│                                                                      │
+│  context_loader ──→ eligibility_reasoner ──→ compliance_gate         │
+│  (parallel I/O)     (multi-hop context)      (fraud + rules)         │
+│       │                                           │                  │
+│       │ (passed)                    (blocked/needs_approval)         │
+│       ▼                                           ▼                  │
+│  action_selector ──→ channel_router ──→ graph_updater                │
+│  (merged LLM call)   (pass-through)    (parallel writes)             │
+└───────────────────────┬──────────────────────────────────────────────┘
                         │
-┌───────────────────────▼──────────────────────────────────────┐
-│  Layer 3: Streamlit Multi-Page App                           │
-│  • Customer Portal — chat interface                          │
-│  • Advisor Dashboard — graph viz + timeline + approvals      │
-│  • Compliance Ops — rule toggles + audit trail               │
-└───────────────────────┬──────────────────────────────────────┘
+┌───────────────────────▼──────────────────────────────────────────────┐
+│  Layer 3: Streamlit Multi-Page App                                   │
+│  • Customer Portal — chat interface + agent invocation               │
+│  • Advisor Dashboard — knowledge graph viz + journey timeline        │
+│  • Compliance Ops — rule toggles + audit trail + edge management     │
+└───────────────────────┬──────────────────────────────────────────────┘
                         │
-┌───────────────────────▼──────────────────────────────────────┐
-│  Layer 4: LangSmith Observability                            │
-│  • Full trace per agent run, stored trace_id in DecisionLog  │
-└──────────────────────────────────────────────────────────────┘
+┌───────────────────────▼──────────────────────────────────────────────┐
+│  Layer 4: Fraud Detection — Graph-Native Identity Linkage            │
+│  • Customer->used_device->Device->device_seen_ip->IPAddress chains   │
+│  • Customer->linked_identity->Customer identity rings                │
+│  • VPN/Tor detection, shared device clusters, geo anomalies          │
+│  • Multi-hop traversals impossible in RDBMS                          │
+└───────────────────────┬──────────────────────────────────────────────┘
+                        │
+┌───────────────────────▼──────────────────────────────────────────────┐
+│  Layer 5: LangSmith Observability                                    │
+│  • Full trace per agent run, stored trace_id in DecisionLog          │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -109,17 +132,27 @@ The app bootstraps the SurrealDB schema and seeds demo personas on first run.
 
 ## Key Technical Features
 
-### SurrealDB as Single Data Layer
-- **Graph traversal**: `->owns->Product`, `->triggered->LifeEvent` fetched in one query
-- **Vector RAG**: `MTREE` index on document embeddings for policy/product search
-- **Checkpoint storage**: `JourneyState.checkpoint_data` stores serialized LangGraph state
+### SurrealDB Cloud v2 — Single Multi-Model Data Layer
+- **Graph traversal**: Clean `->edge->Node.field` syntax for multi-hop queries
+  - `Customer->had_interaction->Interaction->about_product->Product` (4-node chain)
+  - `Customer->has_journey->JourneyState->has_decision->DecisionLog` (audit trail)
+- **SCHEMAFULL mode**: All tables use `DEFINE TABLE OVERWRITE ... SCHEMAFULL` with `TYPE RELATION` edges
+- **Vector RAG**: `MTREE` index (1536-dim cosine) on document embeddings for policy/product search
+- **Idempotent seeding**: `UPSERT` for all node records, `RELATE` with edge existence checks
 - **Real-time evolution**: Every agent run writes new Interaction, LifeEvent, DecisionLog nodes
 
-### LangGraph Orchestration
-- **6-node StateGraph** mixing LLM and deterministic nodes
-- **Compliance gate is pure Python** — no LLM, reads live rules from SurrealDB
-- **SurrealDBCheckpointer** — resumes multi-step flows from database state
-- **Conditional edges** — routes based on compliance outcome
+### Graph-Native Fraud Detection
+- **Identity rings**: `Customer->linked_identity->Customer` recursive traversal (up to N hops)
+- **Shared device clusters**: `Customer->used_device->Device<-used_device<-Customer`
+- **Device-IP chains**: `Customer->used_device->Device->device_seen_ip->IPAddress`
+- **VPN/Tor detection**: IP risk scoring feeds into compliance gate decisions
+- **Multi-hop patterns impossible in RDBMS** — graph structure makes fraud rings visible
+
+### LangGraph Orchestration (Optimized Pipeline)
+- **Parallelized I/O**: `asyncio.gather` for concurrent DB queries in context_loader and graph_updater
+- **Merged LLM calls**: action_selector generates both action + response in one call
+- **Compliance gate is pure Python** — no LLM, reads live rules + fraud signals from SurrealDB
+- **Conditional edges** — routes based on compliance outcome (passed/blocked/needs_approval)
 
 ### Compliance Tiers
 | Tier | Behaviour |
@@ -127,6 +160,13 @@ The app bootstraps the SurrealDB schema and seeds demo personas on first run.
 | `hard` | Product blocked, logged, alternative suggested |
 | `human_approval` | ApprovalRequest created, advisor notified |
 | `audit_only` | Allowed through, flagged for regulatory review |
+
+### Fraud Severity Integration
+| Fraud Severity | Compliance Action |
+|----------------|-------------------|
+| `critical` / `high` | Hard block via compliance gate |
+| `medium` | Escalated to human approval |
+| `low` | Audit-only, logged for review |
 
 ---
 
