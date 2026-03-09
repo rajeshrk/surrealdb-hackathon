@@ -325,6 +325,35 @@ class SurrealClient:
 
         print(f"[SurrealDB] Edge check complete: {created} created, {skipped} already existed")
 
+    async def reset(self) -> None:
+        """Delete ALL data from every table (edges first, then nodes) and re-seed."""
+        print("[SurrealDB] Resetting database — clearing all tables...")
+
+        # Delete edges first (dependency order), then nodes
+        edge_tables = [
+            "linked_identity", "device_seen_ip", "from_ip", "used_device",
+            "has_decision", "has_journey", "about_product", "had_interaction",
+            "waived_by", "unlocks", "triggered", "requires_approval",
+            "blocked_by", "eligible_for", "owns",
+        ]
+        node_tables = [
+            "FraudAlert", "ApprovalRequest", "DecisionLog", "JourneyState",
+            "Interaction", "LifeEvent", "ComplianceRule", "Device", "IPAddress",
+            "Product", "Customer", "document",
+        ]
+
+        for table in edge_tables + node_tables:
+            try:
+                await self.query(f"DELETE {table};")
+                print(f"[SurrealDB] Cleared {table}")
+            except Exception as e:
+                print(f"[SurrealDB WARN] Could not clear {table}: {e}")
+
+        # Re-apply schema + seed
+        print("[SurrealDB] Re-seeding...")
+        await self.bootstrap()
+        print("[SurrealDB] Reset complete.")
+
     async def bootstrap(self) -> None:
         """Apply schema then seed data if Customer table is empty."""
         print("[SurrealDB] Bootstrap starting...")

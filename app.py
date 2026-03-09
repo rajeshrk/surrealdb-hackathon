@@ -110,3 +110,26 @@ with col2:
     st.metric("LangGraph", "6-node StateGraph", "Checkpointed")
 with col3:
     st.metric("Compliance", "3-tier enforcement", "Real-time")
+
+# ── Reset button ──────────────────────────────────────────────────────────
+
+st.divider()
+with st.expander("🔧 Database Management"):
+    st.caption("Clear all interactions, decisions, and fraud alerts — then re-seed fresh demo data.")
+    if st.button("🗑️ Reset Database & Clear All Data", type="secondary"):
+        with st.spinner("Resetting database…"):
+            async def _reset() -> None:
+                db = await SurrealClient.connect()
+                await db.reset()
+                await db.close()
+
+            try:
+                run_sync(_reset())
+                # Clear all session state so pages reload fresh
+                for key in list(st.session_state.keys()):
+                    if key != "db_bootstrapped":
+                        del st.session_state[key]
+                st.success("Database reset complete. All data cleared and re-seeded.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Reset failed: {exc}")
