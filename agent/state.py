@@ -47,3 +47,6 @@ class JourneyAgentState(TypedDict):
     messages: Annotated[list, operator.add]  # ChatMessage list, accumulated across turns
     conversation_intent: str                 # classify: greeting, product_inquiry, follow_up, life_event, general_question, objection
     previously_recommended: List[str]        # product_ids already recommended in this session
+
+    # ── Fraud detection ───────────────────────────────────────
+    fraud_signals: List[dict]               # Graph-native fraud signals from multi-hop traversal

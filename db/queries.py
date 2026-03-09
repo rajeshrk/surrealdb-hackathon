@@ -221,6 +221,486 @@ async def get_graph_for_viz(db: SurrealClient, customer_id: str) -> dict:
     }
 
 
+# ── Multi-hop graph traversal queries ────────────────────────
+
+async def get_life_event_product_paths(db: SurrealClient, event_type: str) -> list[dict]:
+    """
+    LifeEvent -> unlocks -> Product
+    Given an event type, find all products unlocked by it with relevance scores.
+    """
+    return await db.query(
+        """
+        SELECT
+            in.event_type AS event_type,
+            out.id AS product_id,
+            out.name AS product_name,
+            out.category AS product_category,
+            out.risk_level AS product_risk_level,
+            out.requires_kyc AS requires_kyc,
+            relevance
+        FROM unlocks
+        WHERE in.event_type = $etype
+        ORDER BY relevance DESC
+        FETCH in, out
+        """,
+        {"etype": event_type},
+    )
+
+
+async def get_customer_product_compliance_chain(db: SurrealClient, customer_id: str) -> list[dict]:
+    """
+    Customer -> eligible_for -> Product -> blocked_by -> ComplianceRule
+    For each eligible product, find which compliance rules block it.
+    Returns the full 4-node chain for graph visualization and reasoning.
+    """
+    cid = _sanitize_id(customer_id)
+    return await db.query(
+        f"""
+        SELECT
+            ef.out.id    AS product_id,
+            ef.out.name  AS product_name,
+            ef.score     AS eligibility_score,
+            bb.out.id    AS rule_id,
+            bb.out.name  AS rule_name,
+            bb.block_reason AS block_reason,
+            bb.out.enforcement AS enforcement
+        FROM eligible_for AS ef
+        WHERE ef.in = Customer:{cid}
+        AND ef.out IN (SELECT in FROM blocked_by)
+        SPLIT bb
+        LET bb = (SELECT * FROM blocked_by WHERE in = ef.out)
+        """
+    )
+
+
+async def get_customer_interaction_product_trail(db: SurrealClient, customer_id: str) -> list[dict]:
+    """
+    Customer -> had_interaction -> Interaction -> about_product -> Product
+    Returns the 4-node chain showing what products the customer has discussed.
+    """
+    cid = _sanitize_id(customer_id)
+    return await db.query(
+        f"""
+        SELECT
+            hi.out.interaction_type AS interaction_type,
+            hi.out.content AS interaction_content,
+            hi.out.sentiment AS sentiment,
+            hi.out.created_at AS interaction_date,
+            ap.out.id AS product_id,
+            ap.out.name AS product_name,
+            ap.out.category AS product_category
+        FROM had_interaction AS hi
+        WHERE hi.in = Customer:{cid}
+        AND hi.out IN (SELECT in FROM about_product)
+        SPLIT ap
+        LET ap = (SELECT * FROM about_product WHERE in = hi.out)
+        ORDER BY interaction_date DESC
+        """
+    )
+
+
+async def get_customer_journey_decision_trail(db: SurrealClient, customer_id: str) -> list[dict]:
+    """
+    Customer -> has_journey -> JourneyState -> has_decision -> DecisionLog
+    Returns the full audit trail of agent decisions through the journey.
+    """
+    cid = _sanitize_id(customer_id)
+    return await db.query(
+        f"""
+        SELECT
+            js.phase AS journey_phase,
+            js.current_step AS current_step,
+            dl.action_taken AS action_taken,
+            dl.agent_reasoning AS agent_reasoning,
+            dl.confidence_score AS confidence,
+            dl.compliance_gates_passed AS gates_passed,
+            dl.compliance_gates_failed AS gates_failed,
+            dl.requires_human_review AS needs_review,
+            dl.created_at AS decision_date
+        FROM has_journey AS hj
+        WHERE hj.in = Customer:{cid}
+        SPLIT hd
+        LET js = hj.out
+        LET hd = (SELECT * FROM has_decision WHERE in = js.id)
+        LET dl = hd.out
+        ORDER BY decision_date DESC
+        """
+    )
+
+
+async def get_compliance_waiver_paths(db: SurrealClient, product_id: str) -> list[dict]:
+    """
+    ComplianceRule -> waived_by -> Product
+    Check if any compliance rules have waivers for this product.
+    """
+    pid = _sanitize_id(product_id)
+    return await db.query(
+        f"""
+        SELECT
+            in.id AS rule_id,
+            in.name AS rule_name,
+            in.enforcement AS enforcement,
+            reason
+        FROM waived_by
+        WHERE out = Product:{pid}
+        FETCH in
+        """
+    )
+
+
+async def get_fraud_signals(db: SurrealClient, customer_id: str) -> list[dict]:
+    """
+    Graph-native fraud detection via multi-hop traversal.
+    Detects: identity linkage rings, shared device patterns, behavioral anomalies,
+    VPN/Tor usage, and geo anomalies — patterns impossible to find in RDBMS.
+
+    Traversal chains:
+      Customer -> used_device -> Device -> device_seen_ip -> IPAddress (device-IP chain)
+      Customer -> from_ip -> IPAddress (direct IP usage)
+      Customer -> linked_identity -> Customer (identity rings)
+      Customer -> used_device -> Device <- used_device <- Customer (shared device detection)
+    """
+    cid = _sanitize_id(customer_id)
+    signals: list[dict] = []
+
+    # 1. Check for VPN/Tor IP usage (Customer -> from_ip -> IPAddress)
+    suspicious_ips = await db.query(
+        f"""
+        SELECT out.ip AS ip, out.geo_country AS country, out.geo_city AS city,
+               out.is_vpn AS is_vpn, out.is_tor AS is_tor, out.risk_score AS risk_score,
+               session_count, last_used
+        FROM from_ip
+        WHERE in = Customer:{cid} AND (out.is_vpn = true OR out.is_tor = true OR out.risk_score > 0.5)
+        FETCH out
+        """
+    )
+    for ip in suspicious_ips:
+        sig_type = "tor_usage" if ip.get("is_tor") else "vpn_usage" if ip.get("is_vpn") else "suspicious_ip"
+        signals.append({
+            "signal_type": sig_type,
+            "severity": "high" if ip.get("is_tor") else "medium",
+            "description": f"{sig_type}: IP {ip.get('ip')} from {ip.get('city', '?')}, {ip.get('country', '?')} "
+                          f"(risk: {ip.get('risk_score', 0):.0%}, sessions: {ip.get('session_count', 0)})",
+            "evidence": {"ip": ip.get("ip"), "geo": f"{ip.get('city')}, {ip.get('country')}"},
+        })
+
+    # 2. Shared device detection (Customer -> used_device -> Device <- used_device <- OtherCustomer)
+    shared_devices = await db.query(
+        f"""
+        SELECT
+            ud1.out.id AS device_id,
+            ud1.out.device_type AS device_type,
+            ud1.out.risk_score AS device_risk,
+            ud2.in.id AS other_customer_id,
+            ud2.in.name AS other_customer_name
+        FROM used_device AS ud1
+        WHERE ud1.in = Customer:{cid}
+        AND ud1.out IN (
+            SELECT out FROM used_device WHERE in != Customer:{cid}
+        )
+        SPLIT ud2
+        LET ud2 = (SELECT * FROM used_device WHERE out = ud1.out AND in != Customer:{cid} FETCH in)
+        """
+    )
+    for sd in shared_devices:
+        signals.append({
+            "signal_type": "shared_device",
+            "severity": "high" if (sd.get("device_risk") or 0) > 0.5 else "medium",
+            "description": f"Device {sd.get('device_id')} ({sd.get('device_type')}) shared with {sd.get('other_customer_name', 'unknown')} "
+                          f"(device risk: {sd.get('device_risk', 0):.0%})",
+            "evidence": {"device": str(sd.get("device_id")), "shared_with": str(sd.get("other_customer_id"))},
+        })
+
+    # 3. Identity linkage rings (Customer -> linked_identity -> Customer)
+    identity_links = await db.query(
+        f"""
+        SELECT out.id AS linked_id, out.name AS linked_name,
+               link_type, confidence, link_evidence
+        FROM linked_identity
+        WHERE in = Customer:{cid} AND confidence > 0.3
+        ORDER BY confidence DESC
+        """
+    )
+    for link in identity_links:
+        signals.append({
+            "signal_type": "identity_ring",
+            "severity": "critical" if (link.get("confidence") or 0) > 0.8 else "medium",
+            "description": f"Identity link ({link.get('link_type')}): linked to {link.get('linked_name', '?')} "
+                          f"(confidence: {link.get('confidence', 0):.0%}, evidence: {link.get('link_evidence', '')})",
+            "evidence": {"linked_to": str(link.get("linked_id")), "type": link.get("link_type")},
+        })
+
+    # 4. Device -> suspicious IP chain (Customer -> used_device -> Device -> device_seen_ip -> IPAddress)
+    device_ip_chain = await db.query(
+        f"""
+        SELECT
+            ud.out.id AS device_id,
+            dip.out.ip AS ip,
+            dip.out.is_vpn AS is_vpn,
+            dip.out.is_tor AS is_tor,
+            dip.out.risk_score AS ip_risk,
+            dip.out.geo_country AS country
+        FROM used_device AS ud
+        WHERE ud.in = Customer:{cid}
+        AND ud.out IN (
+            SELECT in FROM device_seen_ip WHERE out.risk_score > 0.5 OR out.is_tor = true
+        )
+        SPLIT dip
+        LET dip = (SELECT * FROM device_seen_ip WHERE in = ud.out AND (out.risk_score > 0.5 OR out.is_tor = true) FETCH out)
+        """
+    )
+    for chain in device_ip_chain:
+        signals.append({
+            "signal_type": "device_ip_anomaly",
+            "severity": "high",
+            "description": f"Device {chain.get('device_id')} connected to suspicious IP {chain.get('ip')} "
+                          f"({chain.get('country', '?')}, VPN={chain.get('is_vpn')}, Tor={chain.get('is_tor')})",
+            "evidence": {"device": str(chain.get("device_id")), "ip": chain.get("ip")},
+        })
+
+    # 5. Open fraud alerts
+    alerts = await db.query(
+        f"SELECT * FROM FraudAlert WHERE customer_id = 'Customer:{cid}' AND status IN ['open', 'investigating'] ORDER BY created_at DESC"
+    )
+    for alert in alerts:
+        signals.append({
+            "signal_type": f"alert_{alert.get('alert_type', 'unknown')}",
+            "severity": alert.get("severity", "medium"),
+            "description": alert.get("description", ""),
+            "evidence": alert.get("evidence", {}),
+        })
+
+    return signals
+
+
+async def get_identity_ring(db: SurrealClient, customer_id: str, max_depth: int = 3) -> list[dict]:
+    """
+    Detect identity linkage rings via recursive graph traversal.
+    Customer -> linked_identity -> Customer -> linked_identity -> ... (up to max_depth hops)
+
+    This is the kind of query that makes graph databases shine — finding rings
+    of connected identities that share devices, IPs, or behavioral patterns.
+    """
+    cid = _sanitize_id(customer_id)
+    # SurrealDB doesn't support recursive CTEs, so we do iterative hops
+    visited = set()
+    visited.add(f"Customer:{cid}")
+    ring: list[dict] = []
+    current_layer = [f"Customer:{cid}"]
+
+    for depth in range(max_depth):
+        if not current_layer:
+            break
+        # Find all linked identities from current layer
+        ids_str = ", ".join(current_layer)
+        links = await db.query(
+            f"""
+            SELECT in AS from_id, out.id AS to_id, out.name AS to_name,
+                   link_type, confidence, link_evidence
+            FROM linked_identity
+            WHERE in IN [{ids_str}]
+            FETCH out
+            """
+        )
+        next_layer = []
+        for link in links:
+            to_id = str(link.get("to_id", ""))
+            if to_id and to_id not in visited:
+                visited.add(to_id)
+                next_layer.append(to_id)
+                ring.append({
+                    "from": str(link.get("from_id")),
+                    "to": to_id,
+                    "to_name": link.get("to_name"),
+                    "link_type": link.get("link_type"),
+                    "confidence": link.get("confidence"),
+                    "depth": depth + 1,
+                })
+        current_layer = next_layer
+
+    return ring
+
+
+async def get_shared_device_cluster(db: SurrealClient, device_id: str) -> list[dict]:
+    """
+    Find all customers who have used a specific device.
+    Device <- used_device <- Customer
+    Used to detect account sharing or takeover patterns.
+    """
+    did = _sanitize_id(device_id)
+    return await db.query(
+        f"""
+        SELECT in.id AS customer_id, in.name AS customer_name,
+               session_count, last_used
+        FROM used_device
+        WHERE out = Device:{did}
+        ORDER BY last_used DESC
+        FETCH in
+        """
+    )
+
+
+async def get_full_customer_graph(db: SurrealClient, customer_id: str) -> dict:
+    """
+    Full multi-hop graph exploration for a customer — pulls all relationship chains.
+    Used by the advisor dashboard for complete graph visualization.
+
+    Chains:
+      Customer -> owns -> Product -> blocked_by -> ComplianceRule
+      Customer -> triggered -> LifeEvent -> unlocks -> Product
+      Customer -> had_interaction -> Interaction -> about_product -> Product
+      Customer -> has_journey -> JourneyState -> has_decision -> DecisionLog
+      Product -> requires_approval -> ComplianceRule
+      ComplianceRule -> waived_by -> Product
+    """
+    cid = _sanitize_id(customer_id)
+
+    # 1. Customer -> owns -> Product
+    owned = await db.query(
+        f"SELECT out.id, out.name, out.category, since, status FROM owns WHERE in = Customer:{cid} FETCH out"
+    )
+
+    # 2. Customer -> eligible_for -> Product
+    eligible = await db.query(
+        f"SELECT out.id, out.name, out.category, score, reason FROM eligible_for WHERE in = Customer:{cid} FETCH out"
+    )
+
+    # 3. Customer -> triggered -> LifeEvent -> unlocks -> Product (2-hop)
+    life_event_chains = await db.query(
+        f"""
+        SELECT
+            tr.out.event_type AS event_type,
+            tr.out.confidence AS confidence,
+            tr.out.detected_at AS detected_at,
+            tr.detected_via AS source,
+            ul.out.id AS unlocked_product_id,
+            ul.out.name AS unlocked_product_name,
+            ul.relevance AS product_relevance
+        FROM triggered AS tr
+        WHERE tr.in = Customer:{cid}
+        SPLIT ul
+        LET ul = (SELECT * FROM unlocks WHERE in = tr.out FETCH out)
+        """
+    )
+
+    # 4. Customer -> had_interaction -> Interaction -> about_product -> Product (2-hop)
+    interaction_chains = await db.query(
+        f"""
+        SELECT
+            hi.out.interaction_type AS type,
+            hi.out.content AS content,
+            hi.out.sentiment AS sentiment,
+            hi.out.created_at AS date,
+            ap.out.id AS product_id,
+            ap.out.name AS product_name
+        FROM had_interaction AS hi
+        WHERE hi.in = Customer:{cid}
+        SPLIT ap
+        LET ap = (SELECT * FROM about_product WHERE in = hi.out FETCH out)
+        ORDER BY date DESC
+        """
+    )
+
+    # 5. Product -> blocked_by -> ComplianceRule (for owned + eligible products)
+    all_product_ids = set()
+    for p in owned:
+        pid = p.get("id") or (p.get("out", {}) if isinstance(p.get("out"), dict) else {}).get("id", "")
+        if pid:
+            all_product_ids.add(str(pid))
+    for p in eligible:
+        pid = p.get("id") or (p.get("out", {}) if isinstance(p.get("out"), dict) else {}).get("id", "")
+        if pid:
+            all_product_ids.add(str(pid))
+
+    blocked_chains = await db.query(
+        "SELECT in AS product_id, out.id AS rule_id, out.name AS rule_name, out.enforcement, block_reason FROM blocked_by FETCH out"
+    )
+
+    # 6. Product -> requires_approval -> ComplianceRule
+    approval_chains = await db.query(
+        "SELECT in AS product_id, out.id AS rule_id, out.name AS rule_name, out.enforcement, approval_reason FROM requires_approval FETCH out"
+    )
+
+    # 7. ComplianceRule -> waived_by -> Product
+    waiver_chains = await db.query(
+        "SELECT in AS rule_id, in.name AS rule_name, out AS product_id, reason FROM waived_by FETCH in"
+    )
+
+    # 8. Customer -> has_journey -> JourneyState -> has_decision -> DecisionLog (2-hop)
+    journey_chains = await db.query(
+        f"""
+        SELECT
+            hj.out.phase AS phase,
+            hj.out.current_step AS step,
+            hj.out.pending_approval AS pending,
+            hd.out.action_taken AS decision_action,
+            hd.out.agent_reasoning AS decision_reasoning,
+            hd.out.confidence_score AS decision_confidence,
+            hd.out.created_at AS decision_date
+        FROM has_journey AS hj
+        WHERE hj.in = Customer:{cid}
+        SPLIT hd
+        LET hd = (SELECT * FROM has_decision WHERE in = hj.out FETCH out)
+        ORDER BY decision_date DESC
+        """
+    )
+
+    # 9. Customer -> used_device -> Device (fraud: device fingerprints)
+    devices = await db.query(
+        f"""
+        SELECT out.id AS device_id, out.device_type, out.os, out.risk_score AS device_risk,
+               session_count, last_used
+        FROM used_device
+        WHERE in = Customer:{cid}
+        FETCH out
+        """
+    )
+
+    # 10. Customer -> from_ip -> IPAddress (fraud: IP history)
+    ips = await db.query(
+        f"""
+        SELECT out.ip, out.geo_country, out.geo_city, out.is_vpn, out.is_tor,
+               out.risk_score AS ip_risk, session_count, last_used
+        FROM from_ip
+        WHERE in = Customer:{cid}
+        FETCH out
+        """
+    )
+
+    # 11. Identity linkage ring (fraud: shared identities)
+    identity_links = await db.query(
+        f"""
+        SELECT out.id AS linked_id, out.name AS linked_name,
+               link_type, confidence, link_evidence
+        FROM linked_identity
+        WHERE in = Customer:{cid}
+        FETCH out
+        """
+    )
+
+    # 12. Fraud alerts
+    fraud_alerts = await db.query(
+        f"SELECT * FROM FraudAlert WHERE customer_id = 'Customer:{cid}' ORDER BY created_at DESC"
+    )
+
+    return {
+        "customer_id": f"Customer:{cid}",
+        "owns": owned,
+        "eligible_for": eligible,
+        "life_event_chains": life_event_chains,
+        "interaction_chains": interaction_chains,
+        "blocked_chains": blocked_chains,
+        "approval_chains": approval_chains,
+        "waiver_chains": waiver_chains,
+        "journey_decision_chains": journey_chains,
+        # Fraud detection graph data
+        "devices": devices,
+        "ip_addresses": ips,
+        "identity_links": identity_links,
+        "fraud_alerts": fraud_alerts,
+    }
+
+
 # ── Write queries ─────────────────────────────────────────────
 
 async def write_interaction(

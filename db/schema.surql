@@ -132,8 +132,67 @@ DEFINE FIELD OVERWRITE in  ON has_decision TYPE record<JourneyState>;
 DEFINE FIELD OVERWRITE out ON has_decision TYPE record<DecisionLog>;
 
 DEFINE TABLE OVERWRITE waived_by TYPE RELATION SCHEMAFULL;       -- ComplianceRule -> Product
-DEFINE FIELD OVERWRITE in  ON waived_by TYPE record<ComplianceRule>;
-DEFINE FIELD OVERWRITE out ON waived_by TYPE record<Product>;
+DEFINE FIELD OVERWRITE in     ON waived_by TYPE record<ComplianceRule>;
+DEFINE FIELD OVERWRITE out    ON waived_by TYPE record<Product>;
+DEFINE FIELD OVERWRITE reason ON waived_by TYPE option<string>;
+
+-- ── Fraud Detection — Graph-Native Identity Linkage ──────────
+-- Detect identity rings, shared devices, and behavioral anomalies
+-- via multi-hop graph traversal patterns impossible in RDBMS.
+
+DEFINE TABLE OVERWRITE Device SCHEMAFULL;
+DEFINE FIELD OVERWRITE device_fingerprint ON Device TYPE string;  -- browser fingerprint hash
+DEFINE FIELD OVERWRITE device_type        ON Device TYPE string;  -- mobile, desktop, tablet
+DEFINE FIELD OVERWRITE os                 ON Device TYPE string;
+DEFINE FIELD OVERWRITE browser            ON Device TYPE option<string>;
+DEFINE FIELD OVERWRITE first_seen         ON Device TYPE datetime DEFAULT time::now();
+DEFINE FIELD OVERWRITE last_seen          ON Device TYPE datetime DEFAULT time::now();
+DEFINE FIELD OVERWRITE risk_score         ON Device TYPE float DEFAULT 0.0;  -- 0=clean, 1=high risk
+DEFINE INDEX OVERWRITE idx_device_fp ON Device FIELDS device_fingerprint UNIQUE;
+
+DEFINE TABLE OVERWRITE IPAddress SCHEMAFULL;
+DEFINE FIELD OVERWRITE ip          ON IPAddress TYPE string;
+DEFINE FIELD OVERWRITE geo_country ON IPAddress TYPE option<string>;
+DEFINE FIELD OVERWRITE geo_city    ON IPAddress TYPE option<string>;
+DEFINE FIELD OVERWRITE is_vpn      ON IPAddress TYPE bool DEFAULT false;
+DEFINE FIELD OVERWRITE is_tor      ON IPAddress TYPE bool DEFAULT false;
+DEFINE FIELD OVERWRITE risk_score  ON IPAddress TYPE float DEFAULT 0.0;
+DEFINE FIELD OVERWRITE first_seen  ON IPAddress TYPE datetime DEFAULT time::now();
+DEFINE INDEX OVERWRITE idx_ip_addr ON IPAddress FIELDS ip UNIQUE;
+
+DEFINE TABLE OVERWRITE used_device TYPE RELATION SCHEMAFULL;     -- Customer -> Device
+DEFINE FIELD OVERWRITE in         ON used_device TYPE record<Customer>;
+DEFINE FIELD OVERWRITE out        ON used_device TYPE record<Device>;
+DEFINE FIELD OVERWRITE session_count ON used_device TYPE int DEFAULT 1;
+DEFINE FIELD OVERWRITE last_used  ON used_device TYPE datetime DEFAULT time::now();
+
+DEFINE TABLE OVERWRITE from_ip TYPE RELATION SCHEMAFULL;          -- Customer -> IPAddress
+DEFINE FIELD OVERWRITE in         ON from_ip TYPE record<Customer>;
+DEFINE FIELD OVERWRITE out        ON from_ip TYPE record<IPAddress>;
+DEFINE FIELD OVERWRITE session_count ON from_ip TYPE int DEFAULT 1;
+DEFINE FIELD OVERWRITE last_used  ON from_ip TYPE datetime DEFAULT time::now();
+
+DEFINE TABLE OVERWRITE device_seen_ip TYPE RELATION SCHEMAFULL;   -- Device -> IPAddress
+DEFINE FIELD OVERWRITE in         ON device_seen_ip TYPE record<Device>;
+DEFINE FIELD OVERWRITE out        ON device_seen_ip TYPE record<IPAddress>;
+DEFINE FIELD OVERWRITE times_seen ON device_seen_ip TYPE int DEFAULT 1;
+
+DEFINE TABLE OVERWRITE linked_identity TYPE RELATION SCHEMAFULL;  -- Customer <-> Customer
+DEFINE FIELD OVERWRITE in            ON linked_identity TYPE record<Customer>;
+DEFINE FIELD OVERWRITE out           ON linked_identity TYPE record<Customer>;
+DEFINE FIELD OVERWRITE link_type     ON linked_identity TYPE string;  -- shared_device, shared_ip, shared_email_domain, behavioral
+DEFINE FIELD OVERWRITE confidence    ON linked_identity TYPE float;
+DEFINE FIELD OVERWRITE detected_at   ON linked_identity TYPE datetime DEFAULT time::now();
+DEFINE FIELD OVERWRITE link_evidence ON linked_identity TYPE string;  -- e.g. "Device:abc123" or "IP:1.2.3.4"
+
+DEFINE TABLE OVERWRITE FraudAlert SCHEMAFULL;
+DEFINE FIELD OVERWRITE customer_id ON FraudAlert TYPE string;
+DEFINE FIELD OVERWRITE alert_type  ON FraudAlert TYPE string;  -- identity_ring, shared_device, velocity_anomaly, geo_anomaly, vpn_tor
+DEFINE FIELD OVERWRITE severity    ON FraudAlert TYPE string;  -- low, medium, high, critical
+DEFINE FIELD OVERWRITE description ON FraudAlert TYPE string;
+DEFINE FIELD OVERWRITE evidence    ON FraudAlert TYPE object;
+DEFINE FIELD OVERWRITE status      ON FraudAlert TYPE string DEFAULT 'open';  -- open, investigating, resolved, false_positive
+DEFINE FIELD OVERWRITE created_at  ON FraudAlert TYPE datetime DEFAULT time::now();
 
 -- ── Vector Document Table ────────────────────────────────────
 

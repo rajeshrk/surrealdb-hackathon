@@ -184,33 +184,99 @@ class SurrealClient:
         # Define all expected edges as (table, in_id, out_id, extra_set_clause)
         # extra_set_clause uses SurrealQL syntax (not JSON) for proper type handling
         edge_defs = [
-            # owns
-            ("owns", "Customer:sarah", "Product:checking",
-             "SET status = 'active'"),
-            ("owns", "Customer:james", "Product:premium_mortgage",
-             "SET status = 'active'"),
-            ("owns", "Customer:maria", "Product:basic_savings",
-             "SET status = 'active'"),
-            # eligible_for
-            ("eligible_for", "Customer:sarah", "Product:savings_plus",
-             "SET score = 0.85, reason = 'Good savings pattern'"),
-            ("eligible_for", "Customer:sarah", "Product:mortgage",
-             "SET score = 0.70, reason = 'Stable income, no existing mortgage'"),
-            ("eligible_for", "Customer:james", "Product:home_insurance",
-             "SET score = 0.90, reason = 'Mortgage holder without home insurance'"),
-            ("eligible_for", "Customer:james", "Product:investment_portfolio",
-             "SET score = 0.60, reason = 'Wealth segment, but KYC expired'"),
-            ("eligible_for", "Customer:maria", "Product:cd_account",
-             "SET score = 0.75, reason = 'Long-standing savings customer, CD would improve yield'"),
-            ("eligible_for", "Customer:maria", "Product:retirement_plan",
-             "SET score = 0.80, reason = 'Age and conservative profile match retirement planning'"),
-            # has_journey
+            # ── owns (Customer -> Product) ──
+            ("owns", "Customer:sarah", "Product:checking", "SET status = 'active'"),
+            ("owns", "Customer:james", "Product:premium_mortgage", "SET status = 'active'"),
+            ("owns", "Customer:maria", "Product:basic_savings", "SET status = 'active'"),
+            # ── eligible_for (Customer -> Product) ──
+            ("eligible_for", "Customer:sarah", "Product:savings_plus", "SET score = 0.85, reason = 'Good savings pattern'"),
+            ("eligible_for", "Customer:sarah", "Product:mortgage", "SET score = 0.70, reason = 'Stable income, no existing mortgage'"),
+            ("eligible_for", "Customer:sarah", "Product:life_insurance", "SET score = 0.65, reason = 'Young professional, moderate risk profile'"),
+            ("eligible_for", "Customer:sarah", "Product:edu_savings", "SET score = 0.50, reason = 'Pre-family planning eligibility'"),
+            ("eligible_for", "Customer:james", "Product:home_insurance", "SET score = 0.90, reason = 'Mortgage holder without home insurance'"),
+            ("eligible_for", "Customer:james", "Product:investment_portfolio", "SET score = 0.60, reason = 'Wealth segment, but KYC expired'"),
+            ("eligible_for", "Customer:james", "Product:wealth_management", "SET score = 0.55, reason = 'Wealth segment candidate, requires KYC renewal'"),
+            ("eligible_for", "Customer:james", "Product:life_insurance", "SET score = 0.70, reason = 'Mortgage holder should have life coverage'"),
+            ("eligible_for", "Customer:maria", "Product:cd_account", "SET score = 0.75, reason = 'Long-standing savings customer'"),
+            ("eligible_for", "Customer:maria", "Product:retirement_plan", "SET score = 0.80, reason = 'Age and conservative profile match'"),
+            ("eligible_for", "Customer:maria", "Product:savings_plus", "SET score = 0.60, reason = 'Could upgrade from basic savings'"),
+            # ── blocked_by (Product -> ComplianceRule) ──
+            ("blocked_by", "Product:investment_portfolio", "ComplianceRule:kyc_fresh", "SET block_reason = 'Investment products require current KYC verification'"),
+            ("blocked_by", "Product:wealth_management", "ComplianceRule:kyc_fresh", "SET block_reason = 'Wealth management requires current KYC verification'"),
+            # ── requires_approval (Product -> ComplianceRule) ──
+            ("requires_approval", "Product:investment_portfolio", "ComplianceRule:risk_mismatch", "SET approval_reason = 'High-risk investment requires risk profile review'"),
+            ("requires_approval", "Product:wealth_management", "ComplianceRule:risk_mismatch", "SET approval_reason = 'High-risk wealth products require risk profile review'"),
+            ("requires_approval", "Product:mortgage", "ComplianceRule:risk_mismatch", "SET approval_reason = 'Medium-risk mortgage requires risk review for conservative customers'"),
+            # ── waived_by (ComplianceRule -> Product) ──
+            ("waived_by", "ComplianceRule:kyc_fresh", "Product:checking", "SET reason = 'Basic checking exempt from KYC'"),
+            ("waived_by", "ComplianceRule:kyc_fresh", "Product:basic_savings", "SET reason = 'Basic savings exempt from KYC'"),
+            ("waived_by", "ComplianceRule:kyc_fresh", "Product:edu_savings", "SET reason = 'Education savings basic tier exempt'"),
+            # ── unlocks (LifeEvent -> Product) ──
+            ("unlocks", "LifeEvent:child_born_template", "Product:edu_savings", "SET relevance = 0.95"),
+            ("unlocks", "LifeEvent:child_born_template", "Product:life_insurance", "SET relevance = 0.90"),
+            ("unlocks", "LifeEvent:child_born_template", "Product:savings_plus", "SET relevance = 0.60"),
+            ("unlocks", "LifeEvent:home_purchase_template", "Product:mortgage", "SET relevance = 0.95"),
+            ("unlocks", "LifeEvent:home_purchase_template", "Product:home_insurance", "SET relevance = 0.90"),
+            ("unlocks", "LifeEvent:home_purchase_template", "Product:premium_mortgage", "SET relevance = 0.85"),
+            ("unlocks", "LifeEvent:marriage_template", "Product:life_insurance", "SET relevance = 0.85"),
+            ("unlocks", "LifeEvent:marriage_template", "Product:savings_plus", "SET relevance = 0.70"),
+            ("unlocks", "LifeEvent:marriage_template", "Product:mortgage", "SET relevance = 0.75"),
+            ("unlocks", "LifeEvent:retirement_planning_template", "Product:retirement_plan", "SET relevance = 0.95"),
+            ("unlocks", "LifeEvent:retirement_planning_template", "Product:cd_account", "SET relevance = 0.80"),
+            ("unlocks", "LifeEvent:retirement_planning_template", "Product:wealth_management", "SET relevance = 0.70"),
+            ("unlocks", "LifeEvent:job_change_template", "Product:savings_plus", "SET relevance = 0.75"),
+            ("unlocks", "LifeEvent:job_change_template", "Product:checking", "SET relevance = 0.60"),
+            # ── has_journey (Customer -> JourneyState) ──
             ("has_journey", "Customer:sarah", "JourneyState:sarah_journey", ""),
             ("has_journey", "Customer:james", "JourneyState:james_journey", ""),
             ("has_journey", "Customer:maria", "JourneyState:maria_journey", ""),
-            # had_interaction
+            # ── had_interaction (Customer -> Interaction) ──
+            ("had_interaction", "Customer:sarah", "Interaction:sarah_i1", ""),
+            ("had_interaction", "Customer:sarah", "Interaction:sarah_i2", ""),
+            ("had_interaction", "Customer:james", "Interaction:james_i1", ""),
+            ("had_interaction", "Customer:james", "Interaction:james_i2", ""),
             ("had_interaction", "Customer:maria", "Interaction:maria_i1", ""),
             ("had_interaction", "Customer:maria", "Interaction:maria_i2", ""),
+            ("had_interaction", "Customer:maria", "Interaction:maria_i3", ""),
+            # ── about_product (Interaction -> Product) ──
+            ("about_product", "Interaction:sarah_i1", "Product:savings_plus", ""),
+            ("about_product", "Interaction:sarah_i2", "Product:mortgage", ""),
+            ("about_product", "Interaction:james_i1", "Product:investment_portfolio", ""),
+            ("about_product", "Interaction:james_i2", "Product:home_insurance", ""),
+            ("about_product", "Interaction:maria_i1", "Product:basic_savings", ""),
+            ("about_product", "Interaction:maria_i2", "Product:cd_account", ""),
+            ("about_product", "Interaction:maria_i3", "Product:retirement_plan", ""),
+            # ── has_decision (JourneyState -> DecisionLog) ──
+            ("has_decision", "JourneyState:sarah_journey", "DecisionLog:sarah_d1", ""),
+            ("has_decision", "JourneyState:james_journey", "DecisionLog:james_d1", ""),
+            ("has_decision", "JourneyState:maria_journey", "DecisionLog:maria_d1", ""),
+            ("has_decision", "JourneyState:maria_journey", "DecisionLog:maria_d2", ""),
+            # ── triggered (Customer -> LifeEvent) ──
+            ("triggered", "Customer:maria", "LifeEvent:maria_retirement", "SET detected_via = 'transaction_pattern'"),
+            # ── used_device (Customer -> Device) ──
+            ("used_device", "Customer:sarah", "Device:dev_sarah_iphone", "SET session_count = 45"),
+            ("used_device", "Customer:sarah", "Device:dev_sarah_macbook", "SET session_count = 12"),
+            ("used_device", "Customer:james", "Device:dev_james_desktop", "SET session_count = 120"),
+            ("used_device", "Customer:james", "Device:dev_james_tablet", "SET session_count = 30"),
+            ("used_device", "Customer:james", "Device:dev_suspicious_shared", "SET session_count = 3"),
+            ("used_device", "Customer:maria", "Device:dev_maria_android", "SET session_count = 200"),
+            # ── from_ip (Customer -> IPAddress) ──
+            ("from_ip", "Customer:sarah", "IPAddress:ip_sarah_home", "SET session_count = 50"),
+            ("from_ip", "Customer:james", "IPAddress:ip_james_home", "SET session_count = 80"),
+            ("from_ip", "Customer:james", "IPAddress:ip_james_office", "SET session_count = 40"),
+            ("from_ip", "Customer:james", "IPAddress:ip_suspicious_vpn", "SET session_count = 2"),
+            ("from_ip", "Customer:maria", "IPAddress:ip_maria_home", "SET session_count = 190"),
+            # ── device_seen_ip (Device -> IPAddress) ──
+            ("device_seen_ip", "Device:dev_sarah_iphone", "IPAddress:ip_sarah_home", "SET times_seen = 45"),
+            ("device_seen_ip", "Device:dev_sarah_macbook", "IPAddress:ip_sarah_home", "SET times_seen = 12"),
+            ("device_seen_ip", "Device:dev_james_desktop", "IPAddress:ip_james_home", "SET times_seen = 80"),
+            ("device_seen_ip", "Device:dev_james_desktop", "IPAddress:ip_james_office", "SET times_seen = 40"),
+            ("device_seen_ip", "Device:dev_james_tablet", "IPAddress:ip_james_home", "SET times_seen = 30"),
+            ("device_seen_ip", "Device:dev_suspicious_shared", "IPAddress:ip_suspicious_vpn", "SET times_seen = 3"),
+            ("device_seen_ip", "Device:dev_suspicious_shared", "IPAddress:ip_tor_exit", "SET times_seen = 1"),
+            ("device_seen_ip", "Device:dev_maria_android", "IPAddress:ip_maria_home", "SET times_seen = 190"),
+            # ── linked_identity (Customer -> Customer) ──
+            ("linked_identity", "Customer:james", "Customer:sarah", "SET link_type = 'shared_ip_range', confidence = 0.15, link_evidence = 'Same ISP range — likely benign'"),
         ]
 
         created = 0
@@ -280,7 +346,10 @@ class SurrealClient:
         await self._ensure_edges()
 
         # Report edge counts
-        for table in ("owns", "eligible_for", "has_journey", "had_interaction"):
+        for table in ("owns", "eligible_for", "blocked_by", "requires_approval",
+                      "waived_by", "unlocks", "triggered", "has_journey",
+                      "had_interaction", "about_product", "has_decision",
+                      "used_device", "from_ip", "device_seen_ip", "linked_identity"):
             try:
                 ec = await self.query(f"SELECT count() FROM {table} GROUP ALL")
                 n = ec[0].get("count", 0) if ec else 0
