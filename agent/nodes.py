@@ -211,19 +211,32 @@ def make_nodes(
         interaction_trail = state.get("interaction_product_trail", [])
         trail_summary = ""
         if interaction_trail:
-            trail_lines = [
-                f"- {t.get('interaction_type','?')}: {t.get('product_name','?')} ({t.get('sentiment','?')} sentiment)"
-                for t in interaction_trail[:5]
-            ]
+            trail_lines = []
+            for t in interaction_trail[:5]:
+                itype = t.get('interaction_type', '?')
+                # product_name may be a list from graph traversal ->about_product->Product.name
+                pname = t.get('product_name', '?')
+                if isinstance(pname, list):
+                    pname = pname[0] if pname else '?'
+                sentiment = t.get('sentiment', '?')
+                trail_lines.append(f"- {itype}: {pname} ({sentiment} sentiment)")
             trail_summary = "\nPRODUCT INTERACTION HISTORY (graph: Customer→Interaction→Product):\n" + "\n".join(trail_lines)
 
         past_decisions = state.get("journey_decision_trail", [])
         decision_summary = ""
         if past_decisions:
-            dec_lines = [
-                f"- {d.get('action_taken','?')}: {', '.join(d.get('gates_passed') or [])} (confidence: {d.get('confidence', 0):.0%})"
-                for d in past_decisions[:3]
-            ]
+            dec_lines = []
+            for d in past_decisions[:3]:
+                action = d.get('action_taken', '?')
+                # gates_passed may be nested lists from graph traversal
+                gates = d.get('gates_passed') or []
+                if gates and isinstance(gates[0], list):
+                    gates = [g for sublist in gates for g in sublist]
+                gates_str = ', '.join(str(g) for g in gates) if gates else 'none'
+                conf = d.get('confidence', 0)
+                if isinstance(conf, list):
+                    conf = conf[0] if conf else 0
+                dec_lines.append(f"- {action}: {gates_str} (confidence: {conf:.0%})")
             decision_summary = "\nPAST AGENT DECISIONS (graph: Journey→DecisionLog):\n" + "\n".join(dec_lines)
 
         fraud_signals = state.get("fraud_signals", [])
