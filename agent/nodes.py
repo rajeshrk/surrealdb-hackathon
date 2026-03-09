@@ -103,6 +103,14 @@ def make_nodes(
             ef_all = await db.query("SELECT count() FROM eligible_for GROUP ALL")
             print(f"[Agent DEBUG] Total eligible_for edges in DB: {ef_all}")
 
+        # ── Multi-hop graph traversals ─────────────────────────
+        # These use SurrealDB v2 ->edge->Node.field syntax for deep context
+        interaction_product_trail = await Q.get_customer_interaction_product_trail(db, customer_id)
+        journey_decision_trail = await Q.get_customer_journey_decision_trail(db, customer_id)
+        fraud_signals = await Q.get_fraud_signals(db, customer_id)
+        print(f"[Agent DEBUG] Multi-hop: {len(interaction_product_trail)} interaction trails, "
+              f"{len(journey_decision_trail)} journey decisions, {len(fraud_signals)} fraud signals")
+
         # Vector RAG on the user's message
         user_message = state.get("user_message", "")
         docs: list[dict] = []
@@ -116,9 +124,11 @@ def make_nodes(
         # Flatten profile (strip nested list fields)
         profile = {k: v for k, v in ctx.items() if not isinstance(v, list)}
         journey_states: list = ctx.get("journey_states") or []
-        current_phase = (
-            journey_states[0].get("phase", "active") if journey_states else "active"
-        )
+        current_phase = "active"
+        if journey_states:
+            js = journey_states[0]
+            if isinstance(js, dict):
+                current_phase = js.get("phase", "active")
 
         # Classify conversation intent from the message + history
         intent = await _classify_intent(
@@ -136,6 +146,10 @@ def make_nodes(
             "relevant_documents": docs,
             "journey_phase": current_phase,
             "conversation_intent": intent,
+            # Multi-hop graph context
+            "interaction_product_trail": interaction_product_trail,
+            "journey_decision_trail": journey_decision_trail,
+            "fraud_signals": fraud_signals,
             # Reset per-run state
             "detected_life_events": [],
             "candidates": [],
@@ -240,6 +254,31 @@ Return ONLY the label, nothing else."""
                 f"{', '.join(previously_recommended)}"
             )
 
+        # ── Multi-hop graph context for richer reasoning ──────────
+        interaction_trail = state.get("interaction_product_trail", [])
+        trail_summary = ""
+        if interaction_trail:
+            trail_lines = [
+                f"- {t.get('interaction_type','?')}: {t.get('product_name','?')} ({t.get('sentiment','?')} sentiment)"
+                for t in interaction_trail[:5]
+            ]
+            trail_summary = "\nPRODUCT INTERACTION HISTORY (graph: Customer→Interaction→Product):\n" + "\n".join(trail_lines)
+
+        past_decisions = state.get("journey_decision_trail", [])
+        decision_summary = ""
+        if past_decisions:
+            dec_lines = [
+                f"- {d.get('action_taken','?')}: {', '.join(d.get('gates_passed') or [])} (confidence: {d.get('confidence', 0):.0%})"
+                for d in past_decisions[:3]
+            ]
+            decision_summary = "\nPAST AGENT DECISIONS (graph: Journey→DecisionLog):\n" + "\n".join(dec_lines)
+
+        fraud_signals = state.get("fraud_signals", [])
+        fraud_note = ""
+        if fraud_signals:
+            fraud_lines = [f"- {f.get('signal_type','?')}: {f.get('description','')}" for f in fraud_signals[:3]]
+            fraud_note = "\n⚠ FRAUD SIGNALS DETECTED (graph: Customer→Device→IP traversal):\n" + "\n".join(fraud_lines)
+
         prompt = f"""You are a financial services AI agent orchestrating a customer journey.
 
 CUSTOMER PROFILE:
@@ -253,6 +292,9 @@ RECENT INTERACTIONS (last 5):
 
 ELIGIBLE PRODUCTS (from knowledge graph):
 {json.dumps(eligible_summary, indent=2)}
+{trail_summary}
+{decision_summary}
+{fraud_note}
 
 RELEVANT POLICY DOCS:
 {doc_snippets}
@@ -268,7 +310,8 @@ TASK:
 1. Detect if the customer message reveals a life event (child_born, home_purchase, marriage, retirement_planning, job_change). Set confidence 0–1.
 2. Rank the top 3 product candidates from ELIGIBLE PRODUCTS. Score 0–1 based on fit to the customer's message and situation.
 3. If a product was previously recommended, deprioritize it — suggest alternatives instead.
-4. Provide brief reasoning.
+4. If fraud signals are present, note this in your reasoning — it may affect product suitability.
+5. Provide brief reasoning.
 
 Return ONLY valid JSON:
 {{
@@ -320,7 +363,7 @@ Only include products from the ELIGIBLE PRODUCTS list."""
                 reasoning=output.reasoning or "Using pre-scored eligible products from knowledge graph",
             )
 
-        # Write detected life event to SurrealDB immediately
+        # Write detected life event to SurrealDB + find unlocked products
         new_events: list[dict] = []
         if output.detected_life_event and output.detected_life_event.event_type:
             evt = output.detected_life_event
@@ -336,6 +379,22 @@ Only include products from the ELIGIBLE PRODUCTS list."""
                 "confidence": evt.confidence,
                 "id": ev_id,
             })
+
+            # Multi-hop: LifeEvent → unlocks → Product
+            # Graph traversal finds products unlocked by this life event
+            unlocked = await Q.get_life_event_product_paths(db, evt.event_type)
+            existing_ids = {c.product_id for c in output.candidates}
+            for u in unlocked:
+                pid = str(u.get("product_id", "")).replace("Product:", "")
+                if pid and pid not in existing_ids and pid not in previously_recommended:
+                    output.candidates.append(ProductCandidate(
+                        product_id=pid,
+                        product_name=u.get("product_name", ""),
+                        score=float(u.get("relevance", 0.7)),
+                        rationale=f"Unlocked by {evt.event_type} life event (graph: LifeEvent→unlocks→Product)",
+                    ))
+                    existing_ids.add(pid)
+            print(f"[Agent DEBUG] Life event '{evt.event_type}' unlocked {len(unlocked)} products via graph traversal")
 
         # Enrich candidates with full product metadata
         candidates: list[dict] = []
@@ -505,6 +564,36 @@ Only include products from the ELIGIBLE PRODUCTS list."""
                     "enforcement": "hard",
                     "reason": block.get("block_reason", "Blocked by compliance rule"),
                 })
+
+            # ── Graph-Native Fraud Detection ──────────────────────────────
+            # Fraud signals from multi-hop graph traversal:
+            #   Customer→used_device→Device→device_seen_ip→IPAddress
+            #   Customer→linked_identity→Customer (identity rings)
+            # Severity drives compliance action:
+            #   critical/high → hard block on KYC/high-value products
+            #   medium → require human approval
+            fraud_signals = state.get("fraud_signals", [])
+            for signal in fraud_signals:
+                severity = signal.get("severity", "low")
+                sig_type = signal.get("signal_type", "")
+
+                if severity in ("critical", "high"):
+                    annual_fee = float(product.get("annual_fee") or 0)
+                    requires_kyc = product.get("requires_kyc", False)
+                    if annual_fee > 0 or requires_kyc:
+                        hard_blocks.append({
+                            "rule": f"fraud_{sig_type}",
+                            "name": f"Fraud: {sig_type.replace('_', ' ').title()}",
+                            "enforcement": "hard",
+                            "reason": signal.get("description", "Fraud signal detected via graph traversal"),
+                        })
+                elif severity == "medium":
+                    approval_reqs.append({
+                        "rule": f"fraud_{sig_type}",
+                        "name": f"Fraud Review: {sig_type.replace('_', ' ').title()}",
+                        "enforcement": "human_approval",
+                        "reason": signal.get("description", "Fraud signal requires review"),
+                    })
 
             # ── Verdict ───────────────────────────────────────────────────
             if hard_blocks:
@@ -844,6 +933,8 @@ GENERAL RULES:
         graph_nodes_consulted = [
             "Customer", "Product", "ComplianceRule", "JourneyState", "LifeEvent",
         ]
+        if state.get("fraud_signals"):
+            graph_nodes_consulted.extend(["Device", "IPAddress", "FraudAlert"])
 
         await Q.write_decision_log(
             db,

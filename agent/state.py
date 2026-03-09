@@ -24,6 +24,11 @@ class JourneyAgentState(TypedDict):
     eligible_products: List[dict]
     compliance_blocks: List[dict]
 
+    # ── Multi-hop graph context ────────────────────────────
+    interaction_product_trail: List[dict]   # Customer→Interaction→Product chain
+    journey_decision_trail: List[dict]      # Customer→Journey→DecisionLog chain
+    fraud_signals: List[dict]              # Device/IP/identity-ring signals from graph traversal
+
     # ── Vector RAG context ───────────────────────────────────
     relevant_documents: List[dict]
 
