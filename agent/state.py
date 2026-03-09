@@ -48,7 +48,6 @@ class JourneyAgentState(TypedDict):
     journey_phase: str
     langsmith_trace_id: Optional[str]
 
-    # ── Multi-turn conversation ──────────────────────────────
-    messages: Annotated[list, operator.add]  # ChatMessage list, accumulated across turns
+    # ── Multi-turn conversation (LangGraph memory via reducer) ──
+    messages: Annotated[list, operator.add]  # ChatMessage list, accumulated across turns via operator.add reducer
     conversation_intent: str                 # classify: greeting, product_inquiry, follow_up, life_event, general_question, objection
-    previously_recommended: List[str]        # product_ids already recommended in this session

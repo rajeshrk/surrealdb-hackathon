@@ -30,7 +30,6 @@ def run_agent(
     customer_id: str,
     message: str,
     chat_history: list[dict] | None = None,
-    previously_recommended: list[str] | None = None,
 ) -> dict:
     """Run the LangGraph agent for a given customer + message."""
     from agent.graph import build_journey_graph, make_run_config
@@ -40,6 +39,7 @@ def run_agent(
     run_config = make_run_config(customer_id)
 
     # Pass full conversation history so the agent can generate contextual responses
+    # LangGraph memory: messages accumulate via operator.add reducer across turns
     all_messages = list(chat_history or [])
     all_messages.append({"role": "user", "content": message})
 
@@ -47,7 +47,6 @@ def run_agent(
         "customer_id": customer_id,
         "user_message": message,
         "messages": all_messages,
-        "previously_recommended": previously_recommended or [],
     }
 
     result = run_sync(graph.ainvoke(initial_state, config=run_config))
@@ -102,13 +101,10 @@ with st.sidebar:
 
 if st.session_state.get("last_customer") != customer_id:
     st.session_state["messages"] = []
-    st.session_state["previously_recommended"] = []
     st.session_state["last_customer"] = customer_id
 
 if "messages" not in st.session_state:
     st.session_state["messages"] = []
-if "previously_recommended" not in st.session_state:
-    st.session_state["previously_recommended"] = []
 
 # ── Graph evolution counter ───────────────────────────────────────────────
 
@@ -136,17 +132,11 @@ if user_input := st.chat_input("Type a message…"):
                     customer_id,
                     user_input,
                     chat_history=st.session_state["messages"][:-1],  # exclude current msg (passed separately)
-                    previously_recommended=st.session_state["previously_recommended"],
                 )
                 response = result.get("response_message", "I'm processing your request.")
                 requires_approval = result.get("requires_human_approval", False)
                 detected_events = result.get("detected_life_events", [])
                 compliance = result.get("compliance_result", {})
-
-                # Update previously_recommended from agent result
-                agent_prev = result.get("previously_recommended", [])
-                if agent_prev:
-                    st.session_state["previously_recommended"] = agent_prev
 
             except Exception as exc:
                 response = f"⚠️ Agent error: {exc}"

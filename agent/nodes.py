@@ -3,13 +3,17 @@ LangGraph node implementations — all 6 nodes for the Customer Journey Agent.
 
 Nodes are created via make_nodes() factory which injects db + llm via closure.
 
-Multi-turn conversation principles:
-  1. State stores full chat history (messages) + intent + previously_recommended
-  2. Chat history is passed into every LLM prompt for continuity
-  3. Channel router uses LLM to generate contextual, conversational responses
-  4. Previously recommended products are deprioritized / not repeated
-  5. Assistant messages are appended to state after every turn
-  6. Conversation intent is classified to drive different behavior
+Performance-optimized: only 2 LLM calls per agent run.
+  - LLM Call 1 (eligibility_reasoner): intent + life event + candidate ranking
+  - LLM Call 2 (action_selector): action selection + response generation
+  - compliance_gate between them is deterministic (no LLM)
+  - 2 is the theoretical minimum: compliance gate requires candidates BEFORE,
+    and response generation needs filtered candidates AFTER.
+
+LangGraph memory management:
+  - messages: Annotated[list, operator.add] — accumulates across turns
+  - Checkpointer (MemorySaver/SurrealDB) — persists state between sessions
+  - Chat history passed into LLM prompts for multi-turn continuity
 """
 from __future__ import annotations
 
@@ -48,18 +52,27 @@ class ProductCandidate(BaseModel):
 
 
 class EligibilityOutput(BaseModel):
+    intent: str = Field(
+        "general_question",
+        description="Customer intent: greeting, product_inquiry, follow_up, "
+                    "life_event, general_question, objection, comparison",
+    )
     detected_life_event: Optional[LifeEventDetection] = None
     candidates: list[ProductCandidate]
     reasoning: str
 
 
-class ActionOutput(BaseModel):
+class ActionResponseOutput(BaseModel):
+    """Combined action selection + response generation (single LLM call)."""
     action: str = Field(description="recommend | escalate | retain | inform")
     product_id: Optional[str] = None
     product_name: Optional[str] = None
     rationale: str
     confidence: float = Field(ge=0.0, le=1.0)
     channel: str
+    response_message: str = Field(
+        description="Warm, conversational response to send to the customer"
+    )
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────
@@ -130,12 +143,8 @@ def make_nodes(
             if isinstance(js, dict):
                 current_phase = js.get("phase", "active")
 
-        # Classify conversation intent from the message + history
-        intent = await _classify_intent(
-            llm, user_message, state.get("messages", []),
-            state.get("previously_recommended", []),
-        )
-        print(f"[Agent DEBUG] Conversation intent: {intent}")
+        # No LLM call here — intent classification is folded into eligibility_reasoner
+        # to eliminate a redundant LLM round-trip (~2s saved)
 
         return {
             "customer_profile": profile,
@@ -145,7 +154,7 @@ def make_nodes(
             "eligible_products": eligible,
             "relevant_documents": docs,
             "journey_phase": current_phase,
-            "conversation_intent": intent,
+            "conversation_intent": "",  # Set by eligibility_reasoner
             # Multi-hop graph context
             "interaction_product_trail": interaction_product_trail,
             "journey_decision_trail": journey_decision_trail,
@@ -161,47 +170,8 @@ def make_nodes(
             "langsmith_trace_id": None,
         }
 
-    async def _classify_intent(
-        llm: AzureChatOpenAI,
-        user_message: str,
-        messages: list[dict],
-        previously_recommended: list[str],
-    ) -> str:
-        """Classify conversation intent to drive different agent behavior."""
-        history = _format_chat_history(messages, exclude_current=user_message)
-        prev_products = ", ".join(previously_recommended) if previously_recommended else "none"
-
-        prompt = f"""Classify the customer's intent. Return ONLY one of these labels:
-- greeting: Hello, hi, good morning, etc.
-- product_inquiry: Asking about a specific product or product category
-- follow_up: Asking more about something already discussed (e.g., "tell me more", "what are the fees?")
-- life_event: Sharing a life event (baby, marriage, new home, retirement, job change)
-- general_question: General financial question not about a specific product
-- objection: Expressing concern, hesitation, or declining a recommendation
-- comparison: Asking to compare products or alternatives
-
-{"CONVERSATION HISTORY:" if history else ""}
-{history}
-
-PRODUCTS ALREADY RECOMMENDED: {prev_products}
-CURRENT MESSAGE: "{user_message}"
-
-Return ONLY the label, nothing else."""
-
-        try:
-            response = await llm.ainvoke([HumanMessage(content=prompt)])
-            intent = response.content.strip().lower().replace('"', '').replace("'", "")
-            valid_intents = {
-                "greeting", "product_inquiry", "follow_up", "life_event",
-                "general_question", "objection", "comparison",
-            }
-            if intent in valid_intents:
-                return intent
-        except Exception as e:
-            print(f"[Agent WARN] Intent classification failed: {e}")
-        return "general_question"
-
     # ── Node 2: Eligibility Reasoner (LLM) ───────────────────────────────
+    # Intent classification is folded into this node's output to save one LLM call.
 
     async def eligibility_reasoner_node(state: JourneyAgentState) -> dict:
         customer = state["customer_profile"]
@@ -210,17 +180,6 @@ Return ONLY the label, nothing else."""
         interactions = state["interaction_history"]
         docs = state["relevant_documents"]
         user_message = state.get("user_message", "")
-        intent = state.get("conversation_intent", "general_question")
-        previously_recommended = state.get("previously_recommended", [])
-
-        # For follow-up/greeting intents, skip heavy eligibility reasoning
-        # and reuse prior context — the channel router will handle the response
-        if intent in ("follow_up", "greeting"):
-            return {
-                "detected_life_events": [],
-                "candidates": [],
-                "agent_reasoning": f"Intent '{intent}' — skipping product eligibility, using conversation context.",
-            }
 
         doc_snippets = "\n".join(
             f"- [{d.get('title', '')}]: {d.get('content', '')[:200]}"
@@ -247,12 +206,6 @@ Return ONLY the label, nothing else."""
         history_text = _format_chat_history(
             state.get("messages", []), exclude_current=user_message
         )
-        prev_products_note = ""
-        if previously_recommended:
-            prev_products_note = (
-                f"\nPREVIOUSLY RECOMMENDED (do NOT re-recommend these): "
-                f"{', '.join(previously_recommended)}"
-            )
 
         # ── Multi-hop graph context for richer reasoning ──────────
         interaction_trail = state.get("interaction_product_trail", [])
@@ -298,23 +251,22 @@ ELIGIBLE PRODUCTS (from knowledge graph):
 
 RELEVANT POLICY DOCS:
 {doc_snippets}
-{prev_products_note}
 
 {"CONVERSATION HISTORY:" if history_text else ""}
 {history_text}
 
 CUSTOMER MESSAGE: "{user_message}"
-DETECTED INTENT: {intent}
 
 TASK:
-1. Detect if the customer message reveals a life event (child_born, home_purchase, marriage, retirement_planning, job_change). Set confidence 0–1.
-2. Rank the top 3 product candidates from ELIGIBLE PRODUCTS. Score 0–1 based on fit to the customer's message and situation.
-3. If a product was previously recommended, deprioritize it — suggest alternatives instead.
-4. If fraud signals are present, note this in your reasoning — it may affect product suitability.
+1. Classify the customer's intent as ONE of: greeting, product_inquiry, follow_up, life_event, general_question, objection, comparison
+2. Detect if the message reveals a life event (child_born, home_purchase, marriage, retirement_planning, job_change). Set confidence 0–1.
+3. Rank the top 3 product candidates from ELIGIBLE PRODUCTS most relevant to what the customer is asking about. Score 0–1.
+4. If fraud signals are present, note this in your reasoning.
 5. Provide brief reasoning.
 
 Return ONLY valid JSON:
 {{
+  "intent": "product_inquiry",
   "detected_life_event": {{"event_type": "child_born", "confidence": 0.95, "source": "chat"}} or null,
   "candidates": [
     {{"product_id": "life_insurance", "product_name": "Term Life Insurance", "score": 0.92, "rationale": "..."}}
@@ -338,18 +290,23 @@ Only include products from the ELIGIBLE PRODUCTS list."""
             print(f"[Agent ERROR] Eligibility LLM call failed: {e}")
             output = EligibilityOutput(candidates=[], reasoning=f"LLM error: {e}")
 
+        # Extract intent from LLM output
+        intent = output.intent
+        valid_intents = {
+            "greeting", "product_inquiry", "follow_up", "life_event",
+            "general_question", "objection", "comparison",
+        }
+        if intent not in valid_intents:
+            intent = "general_question"
+        print(f"[Agent DEBUG] Conversation intent (from eligibility LLM): {intent}")
+
         # Fallback: if LLM returned no candidates but we have eligible products,
         # use the DB-scored eligible products directly
         if not output.candidates and eligible_summary:
             print(f"[Agent INFO] LLM returned no candidates; using {len(eligible_summary)} DB-scored products as fallback")
-            # Filter out previously recommended
-            fallback_products = [
-                e for e in eligible_summary
-                if e.get("id") and e.get("name") and e["id"] not in previously_recommended
-            ]
-            if not fallback_products:
-                fallback_products = [e for e in eligible_summary if e.get("id") and e.get("name")]
+            fallback_products = [e for e in eligible_summary if e.get("id") and e.get("name")]
             output = EligibilityOutput(
+                intent=intent,
                 detected_life_event=output.detected_life_event,
                 candidates=[
                     ProductCandidate(
@@ -386,7 +343,7 @@ Only include products from the ELIGIBLE PRODUCTS list."""
             existing_ids = {c.product_id for c in output.candidates}
             for u in unlocked:
                 pid = str(u.get("product_id", "")).replace("Product:", "")
-                if pid and pid not in existing_ids and pid not in previously_recommended:
+                if pid and pid not in existing_ids:
                     output.candidates.append(ProductCandidate(
                         product_id=pid,
                         product_name=u.get("product_name", ""),
@@ -418,6 +375,7 @@ Only include products from the ELIGIBLE PRODUCTS list."""
             "detected_life_events": new_events,
             "candidates": candidates,
             "agent_reasoning": output.reasoning,
+            "conversation_intent": intent,
         }
 
     # ── Node 3: Compliance Gate (DETERMINISTIC — NO LLM) ─────────────────
@@ -622,18 +580,35 @@ Only include products from the ELIGIBLE PRODUCTS list."""
             "requires_human_approval": requires_approval,
         }
 
-    # ── Node 4: Action Selector (LLM + structured output) ────────────────
+    # ── Node 4: Action Selector + Response (MERGED — single LLM call) ────
+    #
+    # WHY 2 LLM CALLS IS THE MINIMUM:
+    # The compliance gate (deterministic) sits between eligibility reasoning
+    # and action selection. We need LLM output BEFORE the gate (to rank
+    # candidates), and LLM output AFTER the gate (to select from filtered
+    # candidates and generate a response). Merging these two into one would
+    # skip compliance checks entirely — unacceptable for financial services.
+    #
+    # Previously 3 LLM calls: intent(2.1s) + eligibility(5.3s) + action(3.9s) = 11.3s
+    # Now 2 LLM calls: eligibility+intent(~5s) + action+response(~4s) = ~9s
 
     async def action_selector_node(state: JourneyAgentState) -> dict:
+        """Select action AND generate response in a single LLM call."""
         passed = state["compliance_result"].get("passed", [])
+        blocked = state["compliance_result"].get("blocked", [])
+        needs_approval_list = state["compliance_result"].get("needs_approval", [])
         customer = state["customer_profile"]
         user_message = state.get("user_message", "")
         journey_phase = state.get("journey_phase", "active")
         channel = customer.get("channel_preference", "app")
         intent = state.get("conversation_intent", "general_question")
-        previously_recommended = state.get("previously_recommended", [])
+
+        name = customer.get("name", "Valued Customer")
+        first_name = name.split()[0]
 
         if not passed:
+            # No candidates — still need a response for blocked/no_candidates path
+            # This is handled by channel_router_node (pass-through for no_candidates)
             return {
                 "selected_action": None,
                 "response_message": "",
@@ -644,9 +619,6 @@ Only include products from the ELIGIBLE PRODUCTS list."""
         history_text = _format_chat_history(
             state.get("messages", []), exclude_current=user_message
         )
-        prev_note = ""
-        if previously_recommended:
-            prev_note = f"\nALREADY RECOMMENDED THIS SESSION: {', '.join(previously_recommended)} — choose a DIFFERENT product if possible."
 
         candidate_summary = [
             {
@@ -658,12 +630,26 @@ Only include products from the ELIGIBLE PRODUCTS list."""
             for c in passed[:3]
         ]
 
-        prompt = f"""You are selecting the single best next action for a financial services customer.
+        # Build context about blocked/approval items
+        context_parts = []
+        for b in blocked:
+            for r in b.get("block_reasons", []):
+                context_parts.append(f"BLOCKED: {b.get('product_name', '')} — {r.get('reason', '')}")
+        for n in needs_approval_list:
+            context_parts.append(f"NEEDS APPROVAL: {n.get('product_name', '')}")
+        detected_events = state.get("detected_life_events", [])
+        for ev in detected_events:
+            context_parts.append(f"LIFE EVENT DETECTED: {ev.get('event_type', '')} (confidence: {ev.get('confidence', 0):.0%})")
+        context_note = "\n".join(context_parts) if context_parts else ""
 
-CUSTOMER: {customer.get('name')}, {customer.get('age')}y, segment={customer.get('segment')}, risk={customer.get('risk_profile')}
+        # MERGED PROMPT: action selection + conversational response in ONE call
+        prompt = f"""You are a friendly, professional banking assistant for {first_name}.
+You must select the best action AND write a warm, conversational response.
+
+CUSTOMER: {first_name}, {customer.get('age')}y, {customer.get('segment', '')} segment, risk={customer.get('risk_profile', '')}
+OWNED PRODUCTS: {[p.get('name', '') for p in state.get('owned_products', [])]}
 JOURNEY PHASE: {journey_phase}
 CONVERSATION INTENT: {intent}
-{prev_note}
 
 {"CONVERSATION HISTORY:" if history_text else ""}
 {history_text}
@@ -673,52 +659,63 @@ CUSTOMER MESSAGE: "{user_message}"
 COMPLIANT CANDIDATES:
 {json.dumps(candidate_summary, indent=2)}
 
-PREVIOUS REASONING: {state['agent_reasoning']}
+{f"COMPLIANCE NOTES:" + chr(10) + context_note if context_note else ""}
 
-Select the SINGLE best action considering the conversation context.
-- If the customer is asking a follow-up, set action to "inform" (provide info, don't re-recommend).
-- If they seem interested, set action to "recommend".
-- If they're objecting or hesitant, set action to "retain".
-- If uncertain, set action to "escalate".
+AGENT REASONING: {state['agent_reasoning']}
+
+ACTION RULES:
+- greeting → action "inform", no product
+- product_inquiry / life_event / comparison → action "recommend" with best-fit product
+- follow_up → action "inform" with the product they're asking about
+- objection → action "retain", address concern empathetically
+- If confidence < {config.CONFIDENCE_THRESHOLD} → action "escalate"
+
+RESPONSE RULES:
+- Respond naturally and conversationally to what the customer said.
+- Use markdown **bold** for product names.
+- Be specific — reference their age, products, situation.
+- End with a relevant question or call to action.
 
 Return ONLY valid JSON:
 {{
   "action": "recommend",
   "product_id": "life_insurance",
   "product_name": "Term Life Insurance",
-  "rationale": "Detailed rationale for this recommendation",
+  "rationale": "Why this action was chosen",
   "confidence": 0.87,
-  "channel": "{channel}"
+  "channel": "{channel}",
+  "response_message": "Warm, conversational response to the customer..."
 }}
 
-action must be one of: recommend, escalate, retain, inform
-If confidence < {config.CONFIDENCE_THRESHOLD}, set action to "escalate"."""
+action must be one of: recommend, escalate, retain, inform"""
 
         try:
             response = await llm.ainvoke([HumanMessage(content=prompt)])
             raw = response.content.strip()
             match = re.search(r"\{.*\}", raw, re.DOTALL)
             if match:
-                action = ActionOutput(**json.loads(match.group()))
+                output = ActionResponseOutput(**json.loads(match.group()))
             else:
-                print(f"[Agent WARN] Action LLM returned unparseable output: {raw[:200]}")
-                action = ActionOutput(
+                print(f"[Agent WARN] Action+Response LLM unparseable: {raw[:200]}")
+                output = ActionResponseOutput(
                     action="recommend",
                     product_id=passed[0]["product_id"],
                     product_name=passed[0]["product_name"],
                     rationale=passed[0].get("rationale", "Best match from eligible products"),
                     confidence=float(passed[0].get("score", 0.6)),
                     channel=channel,
+                    response_message=f"Based on your profile, I recommend our **{passed[0]['product_name']}**. Would you like to learn more?",
                 )
         except Exception as e:
-            print(f"[Agent ERROR] Action LLM call failed: {e}")
-            action = ActionOutput(
+            print(f"[Agent ERROR] Action+Response LLM failed: {e}")
+            output = ActionResponseOutput(
                 action="recommend",
                 product_id=passed[0]["product_id"],
                 product_name=passed[0]["product_name"],
-                rationale=passed[0].get("rationale", f"Top eligible product (LLM unavailable: {e})"),
+                rationale=passed[0].get("rationale", "Top eligible product"),
                 confidence=float(passed[0].get("score", 0.5)),
                 channel=channel,
+                response_message=f"I'd like to suggest our **{passed[0]['product_name']}** for you. Can I share more details?",
             )
 
         # Determine next journey phase
@@ -732,145 +729,48 @@ If confidence < {config.CONFIDENCE_THRESHOLD}, set action to "escalate"."""
         new_phase = phase_transitions.get(journey_phase, journey_phase)
 
         return {
-            "selected_action": action.model_dump(),
+            "selected_action": output.model_dump(),
             "agent_reasoning": (
                 state["agent_reasoning"]
-                + f"\nSelected: {action.action} — {action.rationale}"
+                + f"\nSelected: {output.action} — {output.rationale}"
             ),
             "journey_phase": new_phase,
-            "channel": action.channel,
+            "channel": output.channel,
+            "response_message": output.response_message,
         }
 
-    # ── Node 5: Channel Router (LLM-powered conversational response) ─────
+    # ── Node 5: Channel Router (lightweight pass-through) ─────────────────
+    # Response is already generated by action_selector. This node only
+    # handles the no_candidates path (blocked/needs_approval without passed).
 
     async def channel_router_node(state: JourneyAgentState) -> dict:
-        action = state.get("selected_action")
-        customer = state["customer_profile"]
-        channel = state.get("channel") or customer.get("channel_preference", "app")
-        compliance_result = state.get("compliance_result", {})
-        blocked = compliance_result.get("blocked", [])
-        needs_approval_list = compliance_result.get("needs_approval", [])
-        user_message = state.get("user_message", "")
-        intent = state.get("conversation_intent", "general_question")
+        # If action_selector already set the response, pass through
+        if state.get("response_message"):
+            return {
+                "channel": state.get("channel", "app"),
+            }
 
+        # Only called on no_candidates path — generate a fallback response
+        customer = state["customer_profile"]
+        channel = customer.get("channel_preference", "app")
         name = customer.get("name", "Valued Customer")
         first_name = name.split()[0]
+        compliance_result = state.get("compliance_result", {})
+        needs_approval_list = compliance_result.get("needs_approval", [])
 
-        # Build conversation history
-        history_text = _format_chat_history(
-            state.get("messages", []), exclude_current=user_message
-        )
-
-        # Build context about what happened in the pipeline
-        context_parts = []
-        if action:
-            context_parts.append(
-                f"SELECTED ACTION: {action.get('action')} — "
-                f"Product: {action.get('product_name', 'N/A')} — "
-                f"Rationale: {action.get('rationale', '')}"
+        if state.get("requires_human_approval") and needs_approval_list:
+            product_name = needs_approval_list[0].get("product_name", "a product")
+            msg = (
+                f"I'd love to recommend our **{product_name}** for you, "
+                "but this requires a quick review by your advisor first. "
+                "I've flagged this for them and you'll hear back very soon."
             )
-        if blocked:
-            for b in blocked:
-                reasons = b.get("block_reasons", [])
-                for r in reasons:
-                    context_parts.append(
-                        f"BLOCKED: {b.get('product_name', '')} — {r.get('name', '')}: {r.get('reason', '')}"
-                    )
-        if needs_approval_list:
-            for n in needs_approval_list:
-                context_parts.append(
-                    f"NEEDS APPROVAL: {n.get('product_name', '')} — flagged for advisor review"
-                )
-
-        detected_events = state.get("detected_life_events", [])
-        if detected_events:
-            for ev in detected_events:
-                context_parts.append(
-                    f"LIFE EVENT DETECTED: {ev.get('event_type', '')} (confidence: {ev.get('confidence', 0):.0%})"
-                )
-
-        context_summary = "\n".join(context_parts) if context_parts else "No specific action taken."
-
-        previously_recommended = state.get("previously_recommended", [])
-        prev_note = ""
-        if previously_recommended:
-            prev_note = f"\nPRODUCTS ALREADY DISCUSSED: {', '.join(previously_recommended)} — do NOT repeat these recommendations."
-
-        # Generate conversational response via LLM
-        response_prompt = f"""You are a friendly, professional banking assistant chatting with {first_name}.
-Your tone should be warm, helpful, and conversational. You are NOT a generic chatbot — you have
-real knowledge about the customer and their financial situation.
-
-CUSTOMER: {first_name}, {customer.get('segment', '')} segment, age {customer.get('age', '')}, risk profile: {customer.get('risk_profile', '')}
-OWNED PRODUCTS: {[p.get('name', '') for p in state.get('owned_products', [])]}
-CHANNEL: {channel}
-CONVERSATION INTENT: {intent}
-{prev_note}
-
-{"CONVERSATION HISTORY:" if history_text else ""}
-{history_text}
-
-CURRENT MESSAGE: "{user_message}"
-
-AGENT DECISION:
-{context_summary}
-
-AGENT REASONING: {state.get('agent_reasoning', '')}
-
-INSTRUCTIONS BY INTENT:
-- greeting: Warmly greet {first_name}, mention you're aware of their profile, ask how you can help.
-- product_inquiry: Answer their question about the product. Include specific details like fees, benefits, eligibility.
-- follow_up: Provide MORE DETAILS about the product already discussed. Don't just repeat the recommendation — go deeper (fees, benefits, how to apply, timeline).
-- life_event: Acknowledge the life event warmly, then naturally suggest how your products can help.
-- general_question: Answer their question helpfully using your knowledge of their profile and products.
-- objection: Address their concern directly and empathetically. Offer alternatives or more information.
-- comparison: Compare the relevant products objectively, highlighting pros/cons for their specific situation.
-
-GENERAL RULES:
-- Respond naturally to what the customer said — this is a conversation, not a product pitch.
-- Keep responses concise and focused on the customer's needs and concerns.
-- Use markdown **bold** for product names.
-- NEVER repeat the same recommendation verbatim from conversation history.
-- Be specific — reference the customer's actual situation, age, products, etc.
-- End with a relevant question or call to action."""
-
-        try:
-            response = await llm.ainvoke([HumanMessage(content=response_prompt)])
-            msg = response.content.strip()
-        except Exception as e:
-            print(f"[Agent WARN] Channel router LLM failed: {e}")
-            # Fallback to template-based response
-            if state.get("requires_human_approval"):
-                product_name = (
-                    needs_approval_list[0].get("product_name", "a product")
-                    if needs_approval_list else "a product"
-                )
-                msg = (
-                    f"I'd love to recommend our **{product_name}** for you, "
-                    "but this requires a quick review by your advisor first. "
-                    "I've flagged this for them and you'll hear back very soon."
-                )
-            elif not action or action.get("action") == "escalate":
-                msg = (
-                    f"Based on your profile, I'd like to connect you with one of our advisors "
-                    "who can provide personalised guidance. Shall I arrange a callback?"
-                )
-            elif action:
-                product_name = action.get("product_name", "a suitable product")
-                rationale = action.get("rationale", "")
-                msg = (
-                    f"Great news, {first_name}! Based on your profile, "
-                    f"I recommend our **{product_name}**.\n\n{rationale}\n\n"
-                    "Would you like to proceed or find out more?"
-                )
-            else:
-                msg = "I'm here to help! Could you tell me more about what you're looking for?"
-
-        # High-value products → route to advisor
-        if action and isinstance(action.get("product"), dict):
-            annual_fee = float((action["product"]).get("annual_fee") or 0)
-            if annual_fee > config.HIGH_VALUE_FEE_THRESHOLD:
-                channel = "advisor"
+        else:
+            msg = (
+                f"Thanks for reaching out, {first_name}! Based on your profile, "
+                "I'd like to connect you with one of our advisors who can provide "
+                "personalised guidance. Shall I arrange a callback?"
+            )
 
         return {"channel": channel, "response_message": msg}
 
@@ -972,22 +872,9 @@ GENERAL RULES:
                     ],
                 )
 
-        # 7. Append assistant message to chat history + track recommended products
+        # 7. Append assistant message to chat history (LangGraph memory via operator.add reducer)
         new_messages = [{"role": "assistant", "content": state.get("response_message", "")}]
-
-        # Track which products have been recommended this session
-        newly_recommended = []
-        if action and action.get("action") == "recommend" and action.get("product_id"):
-            pid = action["product_id"]
-            if pid not in state.get("previously_recommended", []):
-                newly_recommended.append(pid)
-
-        result: dict = {"messages": new_messages}
-        if newly_recommended:
-            result["previously_recommended"] = (
-                state.get("previously_recommended", []) + newly_recommended
-            )
-        return result
+        return {"messages": new_messages}
 
     return {
         "context_loader": context_loader_node,
