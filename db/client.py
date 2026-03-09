@@ -276,7 +276,7 @@ class SurrealClient:
             ("device_seen_ip", "Device:dev_suspicious_shared", "IPAddress:ip_tor_exit", "SET times_seen = 1"),
             ("device_seen_ip", "Device:dev_maria_android", "IPAddress:ip_maria_home", "SET times_seen = 190"),
             # ── linked_identity (Customer -> Customer) ──
-            ("linked_identity", "Customer:james", "Customer:sarah", "SET link_type = 'shared_ip_range', confidence = 0.15, link_evidence = 'Same ISP range — likely benign'"),
+            ("linked_identity", "Customer:james", "Customer:sarah", "SET link_type = 'shared_ip_range', confidence = 0.15, link_evidence = 'Same ISP range - likely benign'"),
         ]
 
         created = 0

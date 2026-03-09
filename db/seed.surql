@@ -146,13 +146,13 @@ CREATE Customer:sarah SET
     age = 29,
     risk_profile = 'moderate',
     kyc_status = 'verified',
-    kyc_verified_at = time::now() - 2mo,
+    kyc_verified_at = time::now() - 60d,
     segment = 'retail',
     channel_preference = 'app',
     vulnerable_flag = false;
 
 -- Customer -> owns -> Product
-RELATE Customer:sarah->owns->Product:checking SET since = time::now() - 6mo, status = 'active';
+RELATE Customer:sarah->owns->Product:checking SET since = time::now() - 180d, status = 'active';
 
 -- Customer -> eligible_for -> Product
 RELATE Customer:sarah->eligible_for->Product:savings_plus SET score = 0.85, reason = 'Good savings pattern';
@@ -215,7 +215,7 @@ CREATE Customer:james SET
     age = 42,
     risk_profile = 'moderate',
     kyc_status = 'expired',
-    kyc_verified_at = time::now() - 14mo,
+    kyc_verified_at = time::now() - 420d,
     segment = 'wealth',
     channel_preference = 'advisor',
     vulnerable_flag = false;
@@ -284,7 +284,7 @@ CREATE Customer:maria SET
     age = 55,
     risk_profile = 'conservative',
     kyc_status = 'verified',
-    kyc_verified_at = time::now() - 3mo,
+    kyc_verified_at = time::now() - 90d,
     segment = 'retail',
     channel_preference = 'email',
     vulnerable_flag = false;
@@ -382,12 +382,12 @@ RELATE JourneyState:maria_journey->has_decision->DecisionLog:maria_d2;
 CREATE Device:dev_sarah_iphone SET
     device_fingerprint = 'fp_a1b2c3d4e5_iphone14',
     device_type = 'mobile', os = 'iOS 17', browser = 'Safari',
-    first_seen = time::now() - 6mo, last_seen = time::now() - 1d, risk_score = 0.0;
+    first_seen = time::now() - 180d, last_seen = time::now() - 1d, risk_score = 0.0;
 
 CREATE Device:dev_sarah_macbook SET
     device_fingerprint = 'fp_f6g7h8i9j0_macbook',
     device_type = 'desktop', os = 'macOS 14', browser = 'Chrome',
-    first_seen = time::now() - 5mo, last_seen = time::now() - 3d, risk_score = 0.0;
+    first_seen = time::now() - 150d, last_seen = time::now() - 3d, risk_score = 0.0;
 
 CREATE Device:dev_james_desktop SET
     device_fingerprint = 'fp_k1l2m3n4o5_win11',
@@ -413,7 +413,7 @@ CREATE Device:dev_suspicious_shared SET
 -- ── IP Addresses ───────────────────────────────────────────────
 CREATE IPAddress:ip_sarah_home SET
     ip = '203.0.113.10', geo_country = 'US', geo_city = 'San Francisco',
-    is_vpn = false, is_tor = false, risk_score = 0.0, first_seen = time::now() - 6mo;
+    is_vpn = false, is_tor = false, risk_score = 0.0, first_seen = time::now() - 180d;
 
 CREATE IPAddress:ip_james_home SET
     ip = '198.51.100.22', geo_country = 'US', geo_city = 'New York',
@@ -468,7 +468,7 @@ RELATE Device:dev_maria_android->device_seen_ip->IPAddress:ip_maria_home SET tim
 RELATE Customer:james->linked_identity->Customer:sarah SET
     link_type = 'shared_ip_range',
     confidence = 0.15,
-    link_evidence = 'Same ISP range (198.51.100.x / 203.0.113.x) — likely benign',
+    link_evidence = 'Same ISP range (198.51.100.x / 203.0.113.x) - likely benign',
     detected_at = time::now() - 60d;
 
 -- ── Fraud Alerts (pre-seeded for demo) ─────────────────────────
@@ -476,7 +476,7 @@ CREATE FraudAlert:alert_james_vpn SET
     customer_id = 'Customer:james',
     alert_type = 'vpn_tor',
     severity = 'medium',
-    description = 'Customer accessed account from VPN IP (Bucharest, Romania) — unusual for NYC-based customer',
+    description = 'Customer accessed account from VPN IP (Bucharest, Romania) - unusual for NYC-based customer',
     evidence = { ip: '10.255.0.99', geo: 'Bucharest, RO', is_vpn: true, normal_geo: 'New York, US' },
     status = 'open',
     created_at = time::now() - 5d;
@@ -485,7 +485,7 @@ CREATE FraudAlert:alert_james_device SET
     customer_id = 'Customer:james',
     alert_type = 'shared_device',
     severity = 'high',
-    description = 'Shared device (dev_suspicious_shared) also seen with Tor exit node — potential account compromise',
+    description = 'Shared device (dev_suspicious_shared) also seen with Tor exit node - potential account compromise',
     evidence = { device: 'Device:dev_suspicious_shared', tor_ip: '10.255.0.200', sessions: 3 },
     status = 'investigating',
     created_at = time::now() - 2d;

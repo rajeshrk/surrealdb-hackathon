@@ -36,7 +36,7 @@ DEFINE FIELD OVERWRITE name        ON ComplianceRule TYPE string;
 DEFINE FIELD OVERWRITE description ON ComplianceRule TYPE string;
 DEFINE FIELD OVERWRITE enforcement ON ComplianceRule TYPE string; -- hard, human_approval, audit_only
 DEFINE FIELD OVERWRITE active      ON ComplianceRule TYPE bool DEFAULT true;
-DEFINE FIELD OVERWRITE conditions  ON ComplianceRule TYPE object;
+DEFINE FIELD OVERWRITE conditions  ON ComplianceRule FLEXIBLE TYPE object;
 DEFINE FIELD OVERWRITE created_at  ON ComplianceRule TYPE datetime DEFAULT time::now();
 
 DEFINE TABLE OVERWRITE Interaction SCHEMAFULL;
@@ -190,7 +190,7 @@ DEFINE FIELD OVERWRITE customer_id ON FraudAlert TYPE string;
 DEFINE FIELD OVERWRITE alert_type  ON FraudAlert TYPE string;  -- identity_ring, shared_device, velocity_anomaly, geo_anomaly, vpn_tor
 DEFINE FIELD OVERWRITE severity    ON FraudAlert TYPE string;  -- low, medium, high, critical
 DEFINE FIELD OVERWRITE description ON FraudAlert TYPE string;
-DEFINE FIELD OVERWRITE evidence    ON FraudAlert TYPE object;
+DEFINE FIELD OVERWRITE evidence    ON FraudAlert FLEXIBLE TYPE object;
 DEFINE FIELD OVERWRITE status      ON FraudAlert TYPE string DEFAULT 'open';  -- open, investigating, resolved, false_positive
 DEFINE FIELD OVERWRITE created_at  ON FraudAlert TYPE datetime DEFAULT time::now();
 
@@ -200,5 +200,5 @@ DEFINE TABLE OVERWRITE document SCHEMAFULL;
 DEFINE FIELD OVERWRITE title     ON document TYPE string;
 DEFINE FIELD OVERWRITE content   ON document TYPE string;
 DEFINE FIELD OVERWRITE doc_type  ON document TYPE string; -- policy, product_brief, advisor_note, regulation
-DEFINE FIELD OVERWRITE embedding ON document TYPE array<float>;
+DEFINE FIELD OVERWRITE embedding ON document FLEXIBLE TYPE array;
 DEFINE INDEX OVERWRITE idx_document_embedding ON document FIELDS embedding MTREE DIMENSION 1536 DIST COSINE;
