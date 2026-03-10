@@ -11,6 +11,12 @@ from typing import Any
 from db.client import SurrealClient
 
 
+def _safe_strings(items: list) -> list[str]:
+    """Coerce items to plain strings, replacing colons to prevent SurrealDB
+    from interpreting values like 'vpn_usage:IP' as record links (table:id)."""
+    return [str(v).replace(":", " -") for v in items]
+
+
 def _sanitize_id(raw: str) -> str:
     """Strip table prefix if present and validate the ID is alphanumeric/underscore only."""
     # Remove table prefix like "Customer:" if present
@@ -805,11 +811,6 @@ async def write_decision_log(
     # Step 1: Create the DecisionLog node
     # Omit optional fields when None to avoid NULL vs NONE coercion errors
     trace_clause = "langsmith_trace_id = $trace_id," if langsmith_trace_id else ""
-    # Sanitize list values: replace colons with dashes to prevent SurrealDB
-    # from interpreting strings like "Fraud:Device" as record links (table:id).
-    def _safe_strings(items: list) -> list[str]:
-        return [str(v).replace(":", " -") for v in items]
-
     params: dict = {
         "action": action_taken,
         "reasoning": agent_reasoning,
@@ -933,7 +934,7 @@ async def create_approval_request(
         {
             "action": proposed_action,
             "rationale": agent_rationale,
-            "risks": risk_factors,
+            "risks": _safe_strings(risk_factors),
         },
     )
     return str(rows[0].get("id", "")) if rows else ""
