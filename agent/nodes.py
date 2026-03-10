@@ -563,14 +563,14 @@ Only include products from the ELIGIBLE PRODUCTS list."""
                     if annual_fee > 0 or requires_kyc:
                         hard_blocks.append({
                             "rule": f"fraud_{sig_type}",
-                            "name": f"Fraud: {sig_type.replace('_', ' ').title()}",
+                            "name": f"Fraud - {sig_type.replace('_', ' ').title()}",
                             "enforcement": "hard",
                             "reason": signal.get("description", "Fraud signal detected via graph traversal"),
                         })
                 elif severity == "medium":
                     approval_reqs.append({
                         "rule": f"fraud_{sig_type}",
-                        "name": f"Fraud Review: {sig_type.replace('_', ' ').title()}",
+                        "name": f"Fraud Review - {sig_type.replace('_', ' ').title()}",
                         "enforcement": "human_approval",
                         "reason": signal.get("description", "Fraud signal requires review"),
                     })

@@ -805,13 +805,18 @@ async def write_decision_log(
     # Step 1: Create the DecisionLog node
     # Omit optional fields when None to avoid NULL vs NONE coercion errors
     trace_clause = "langsmith_trace_id = $trace_id," if langsmith_trace_id else ""
+    # Sanitize list values: replace colons with dashes to prevent SurrealDB
+    # from interpreting strings like "Fraud:Device" as record links (table:id).
+    def _safe_strings(items: list) -> list[str]:
+        return [str(v).replace(":", " -") for v in items]
+
     params: dict = {
         "action": action_taken,
         "reasoning": agent_reasoning,
         "score": confidence_score,
-        "passed": compliance_gates_passed,
-        "failed": compliance_gates_failed,
-        "nodes": graph_nodes_consulted,
+        "passed": _safe_strings(compliance_gates_passed),
+        "failed": _safe_strings(compliance_gates_failed),
+        "nodes": _safe_strings(graph_nodes_consulted),
         "needs_review": requires_human_review,
     }
     if langsmith_trace_id:
